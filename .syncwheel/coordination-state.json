@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/selective-publication-v2": "3c41e5bb3d704392b325aee3e0401f8b717fb9e3"
+    "refs/heads/pr/selective-publication-v2": "6520f3abd2f052dcf30815da3150172fb9b7fcea"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -80,7 +80,7 @@
     "refs/heads/pr/scoped-integration-resolution": "3bad2de14f60dd123005c9f69f8c4d546fe5bfe1",
     "refs/heads/pr/scoped-stack-add": "a13fd09b3f3bb0a122784232b7ac4035f53de5c1",
     "refs/heads/pr/selective-coordination-projection": "ba46f577a3cf7a347039aea8818150873178b37f",
-    "refs/heads/pr/selective-publication-v2": "b3745f8db2d2fd04de8a3fd19e7a73e54f9afd1d",
+    "refs/heads/pr/selective-publication-v2": "6f0ae95ab3df0fe908ce171b2a21f865e209f41c",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/skill-staging-rule": "cedf54616ca332343c08812026ce97283bda86a6",
     "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
@@ -124,7 +124,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-24T08:57:12+00:00",
+  "created_at": "2026-11-24T09:25:05+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -222,7 +222,7 @@
     "refs/heads/pr/scoped-integration-resolution": "257cc025e05a570e4a97111df5b2b109004896b0",
     "refs/heads/pr/scoped-stack-add": "74561e7e4f4b17eb5a7097b76e6bc8767b9bf2ea",
     "refs/heads/pr/selective-coordination-projection": "c3109e4ef1724e5a391eba2d7aa3b1f1ee96e7f8",
-    "refs/heads/pr/selective-publication-v2": "3c41e5bb3d704392b325aee3e0401f8b717fb9e3",
+    "refs/heads/pr/selective-publication-v2": "6520f3abd2f052dcf30815da3150172fb9b7fcea",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/skill-staging-rule": "5f514b397d8f386fa8a205eb198d974dc28bfb98",
     "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693",
@@ -485,13 +485,13 @@
       },
       {
         "adopted_history": {
-          "base": "d79771a5330c5cce35826aee5fad0b060be67df0",
-          "tip": "3c41e5bb3d704392b325aee3e0401f8b717fb9e3"
+          "base": "3a26597180315565f04d96c7b3226a90ef24ed7b",
+          "tip": "6520f3abd2f052dcf30815da3150172fb9b7fcea"
         },
-        "base": "d79771a5330c5cce35826aee5fad0b060be67df0",
+        "base": "3a26597180315565f04d96c7b3226a90ef24ed7b",
         "branch": "pr/selective-publication-v2",
         "commits": [
-          "3c41e5bb3d704392b325aee3e0401f8b717fb9e3"
+          "6520f3abd2f052dcf30815da3150172fb9b7fcea"
         ],
         "id": "selective-publication-v2",
         "integration_branch": "main-integration",
@@ -543,10 +543,10 @@
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "aa918a57-acaf-4263-b2ae-da66ae166711",
-  "parent_state": "d3a7a378296d7edce5130718a4f21c6de1e5e092",
+  "operation_token": "83aea8c7-f69f-436b-a342-d14bca94b6b6",
+  "parent_state": "84cddc17ddc5c44f18c27d46969dfa49d280703e",
   "projection_status": "partial",
-  "publication_id": "2c849d24-6fa6-412c-a455-ef036650f7e9",
+  "publication_id": "8e4d0bdf-2801-4e7c-b2ce-82ea5ff08555",
   "publication_scope": "compose-stack:selective-publication-v2",
   "schema_version": 5,
   "syncwheel_version": "0.47.35",
