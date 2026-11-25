@@ -179,7 +179,7 @@ class StackSyncMetadataTest(unittest.TestCase):
         personal.parent.mkdir(exist_ok=True)
         personal.write_bytes(shared.read_bytes())
         profile = module.load_repo_profile(repo)
-        module.save_repo_profile(repo, {**profile, 'personal': 'selected'})
+        module.save_repo_profile(repo, {**profile, 'personal': 'selected'}, expected=profile)
         fixture.environment['SYNCWHEEL_PERSONAL'] = 'selected'
         personal_before = file_state(personal)
         personal_ledger = directory_state(module.ledger_root(repo, personal))

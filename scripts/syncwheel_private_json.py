@@ -38,19 +38,25 @@ def load_document(path, default, *, invalid_label='invalid JSON file',
     return JsonSnapshot(value, path, payload)
 
 
-def save_document(path, document, *, lock, write_json):
+def save_document(path, document, *, lock, write_json, expected=None):
     path = Path(path)
     identity = str(path.absolute())
-    if isinstance(document, JsonSnapshot):
-        if document.path != identity:
+    snapshot = expected if expected is not None else document
+    if isinstance(snapshot, JsonSnapshot):
+        if snapshot.path != identity:
             raise SyncwheelError('private JSON snapshot belongs to a different path')
-        expected = document.preimage
+        preimage = snapshot.preimage
     else:
-        # An explicitly supplied replacement has no prior read to preserve.
-        # Still freeze it before entering the lock so a racing save refuses.
-        expected = observed_bytes(path)
+        if expected is not None or observed_bytes(path) is not None:
+            raise SyncwheelError(
+                f'private JSON save requires a read snapshot for an existing document: {path}; '
+                'edit the loaded snapshot or pass it as expected='
+            )
+        # A plain dictionary may initialize an absent document, but it can
+        # never replace an existing one without evidence of the original read.
+        preimage = None
     with lock(path):
-        if observed_bytes(path) != expected:
+        if observed_bytes(path) != preimage:
             raise SyncwheelError(
                 f'private JSON configuration changed concurrently: {path}; '
                 're-read and reapply the requested change'

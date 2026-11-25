@@ -114,6 +114,34 @@ class PrivateJsonConcurrencyTest(unittest.TestCase):
         self.assertEqual(json.loads(self.profile.read_text()),
                          {'worktree_policy': {'expiry': 'off'}, 'foreign': {'keep': True}})
 
+    def test_plain_dictionary_cannot_discard_a_concurrent_global_or_repo_update(self):
+        module = self.fixture.load_syncwheel_module()
+        for path, scope, load, save in (
+            (self.settings, 'self',
+             lambda: module.load_private_configuration(self.settings, {}),
+             lambda value, **kw: module.save_private_configuration(self.settings, value, **kw)),
+            (self.profile, 'repo',
+             lambda: module.load_repo_profile(self.fixture.repo),
+             lambda value, **kw: module.save_repo_profile(self.fixture.repo, value, **kw)),
+        ):
+            with self.subTest(scope=scope):
+                path.write_text('{"foreign":{"keep":true}}\n')
+                snapshot = load()
+                stale_dict = {**snapshot, 'personal': 'alice'}
+                self.fixture.run_cli(scope, 'worktree-policy', 'set', '--expiry', 'off', '--apply')
+                winner = path.read_bytes()
+                with self.assertRaisesRegex(module.SyncwheelError, 'requires a read snapshot'):
+                    save(stale_dict)
+                self.assertEqual(path.read_bytes(), winner)
+                with self.assertRaisesRegex(module.SyncwheelError, 'changed concurrently'):
+                    save(stale_dict, expected=snapshot)
+                self.assertEqual(path.read_bytes(), winner)
+                fresh = load()
+                save({**fresh, 'personal': 'alice'}, expected=fresh)
+                self.assertEqual(json.loads(path.read_text()), {
+                    'foreign': {'keep': True}, 'worktree_policy': {'expiry': 'off'}, 'personal': 'alice',
+                })
+
 
 if __name__ == '__main__':
     unittest.main()

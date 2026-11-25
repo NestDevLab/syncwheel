@@ -838,9 +838,9 @@ def private_json_configuration_lock(path):
     )
 
 
-def save_private_configuration(path, data):
+def save_private_configuration(path, data, *, expected=None):
     return _private_json.save_document(
-        path, data, lock=private_json_configuration_lock,
+        path, data, expected=expected, lock=private_json_configuration_lock,
         write_json=lambda destination, value: atomic_write_private_json(destination, value, indent=2),
     )
 
@@ -5326,8 +5326,8 @@ def checked_repo_profile_path(repo_root):
     return path
 
 
-def save_repo_profile(repo_root, profile):
-    return save_private_configuration(checked_repo_profile_path(repo_root), profile)
+def save_repo_profile(repo_root, profile, *, expected=None):
+    return save_private_configuration(checked_repo_profile_path(repo_root), profile, expected=expected)
 
 
 def worktree_policy_root(repo_root):

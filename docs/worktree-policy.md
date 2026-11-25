@@ -59,6 +59,13 @@ current configuration and rerun the intended update. Concurrent changes are
 never silently merged or discarded. Selecting `use --shared` removes only the
 personal selection and preserves other profile keys.
 
+Internal callers must edit the object returned by `load_repo_profile` or
+`load_private_configuration`, or pass that original object as `expected=` when
+saving a replacement dictionary. Copying into a plain `dict` discards the read
+proof: it cannot replace an existing document without an explicit expected
+snapshot. Plain dictionaries can only initialize an absent file. A stale
+expected snapshot still fails CAS; supplying one does not waive concurrency.
+
 ## Scope and limits
 
 `expiry off` stops treating a passed lease timestamp as expiration, including
