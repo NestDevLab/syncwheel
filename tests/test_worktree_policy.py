@@ -69,6 +69,17 @@ class WorktreePolicyTest(unittest.TestCase):
         self.assertEqual(json.loads(self.profile.read_text()),
                          {'personal': 'alice', 'coordination': {'locks': {}}})
 
+    def test_clear_without_fields_is_valid_for_both_scopes(self):
+        self.set_policy('self', '--expiry', 'off', '--writer-exclusivity', 'warn')
+        self.set_policy('repo', '--expiry', 'enforced', '--writer-exclusivity', 'block')
+        self.command('repo', 'clear', '--apply')
+        inherited = json.loads(self.command('repo', 'status').stdout)
+        self.assertEqual(inherited['effective'], {'expiry': 'off', 'writer_exclusivity': 'warn'})
+        self.command('self', 'clear', '--apply', cwd=self.fixture.tmp)
+        defaults = json.loads(self.command('self', 'status', cwd=self.fixture.tmp).stdout)
+        self.assertEqual(defaults['effective'], {'expiry': 'enforced', 'writer_exclusivity': 'legacy'})
+        self.command('self', 'clear', 'unknown', '--apply', expected=2)
+
     def test_default_legacy_and_invalid_values_fail_without_writes(self):
         result = json.loads(self.command('self', 'status', cwd=self.fixture.tmp).stdout)
         self.assertEqual(result['effective'], {'expiry': 'enforced', 'writer_exclusivity': 'legacy'})

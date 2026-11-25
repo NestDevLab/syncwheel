@@ -29,6 +29,13 @@ from syncwheel_manifest import (
 )
 
 
+def worktree_policy_field(value):
+    fields = tuple(field.replace('_', '-') for field in POLICY_VALUES)
+    if value not in fields:
+        raise argparse.ArgumentTypeError('expected one of: ' + ', '.join(fields))
+    return value
+
+
 def add_worktree_policy_parser(parent, commands, *, scope, common=None):
     policy = parent.add_parser('worktree-policy', help='user defaults or private repository worktree policy')
     actions = policy.add_subparsers(dest='policy_action', required=True)
@@ -40,7 +47,10 @@ def add_worktree_policy_parser(parent, commands, *, scope, common=None):
             for field, values in POLICY_VALUES.items():
                 parser.add_argument('--' + field.replace('_', '-'), choices=values)
         if action == 'clear':
-            parser.add_argument('fields', nargs='*', choices=['expiry', 'writer-exclusivity'])
+            # Python 3.11 applies choices to the empty list for nargs='*'.
+            # Validate each supplied field instead, preserving clear-all.
+            parser.add_argument('fields', nargs='*', type=worktree_policy_field, metavar='FIELD',
+                                help='expiry or writer-exclusivity; omit to clear both')
         if action != 'status':
             parser.add_argument('-a', '--apply', action='store_true')
 
