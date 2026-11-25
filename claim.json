@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/worktree-user-policies"
   ],
-  "claimed_at": "2026-11-25T19:23:40+00:00",
+  "claimed_at": "2026-11-25T19:41:10+00:00",
   "coordination_id": "default",
-  "operation_token": "e0033131-f13c-4784-a48d-efd843dd43e3",
+  "operation_token": "7057f24d-f55e-4c05-8cf3-c4618e5d7684",
   "publication_scope": "compose-stack:worktree-user-policies",
   "source_ref": "refs/heads/pr/worktree-user-policies",
   "syncwheel_version": "0.47.34"
