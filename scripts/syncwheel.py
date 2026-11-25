@@ -346,6 +346,7 @@ from syncwheel_coordination import (
 )
 
 import syncwheel_cli as _cli
+import syncwheel_worktree_policy as _worktree_policy
 from syncwheel_contracts import (
     AUTHORITY_GRANTABLE_CLASSES,
     COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
@@ -5309,6 +5310,36 @@ def checked_repo_profile_path(repo_root):
 
 def save_repo_profile(repo_root, profile):
     return atomic_write_private_json(checked_repo_profile_path(repo_root), profile, indent=2)
+
+
+def worktree_policy_root(repo_root):
+    worktrees = get_worktrees(repo_root)
+    return Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root).resolve()
+
+
+def effective_worktree_policy(repo_root):
+    return _worktree_policy.resolve_policy(
+        load_json_file(get_settings_path(), {}),
+        load_repo_profile(worktree_policy_root(repo_root)),
+    )['effective']
+
+
+def command_worktree_policy(args):
+    options = {}
+    if args.policy_scope == 'repo':
+        root = worktree_policy_root(resolve_repo_root(args.repo))
+        path = checked_repo_profile_path(root)
+        if args.policy_action != 'status' and (git_path_is_tracked(root, path) or git(
+            root, 'check-ignore', '--quiet', '--no-index', '--',
+            '.syncwheel/profile.local.json', check=False,
+        ).returncode != 0):
+            raise SyncwheelError('worktree policy profile must be ignored and untracked')
+        options = dict(profile_path=path, load_profile=lambda: load_repo_profile(root),
+                       write_profile=lambda value: save_repo_profile(root, value))
+    return _worktree_policy.run_policy_command(
+        args, settings_path=get_settings_path(), load_json=load_json_file,
+        write_json=atomic_write_private_json, **options,
+    )
 
 
 def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
@@ -12143,6 +12174,11 @@ def command_worktree_open(args):
             )
         persist = governed_worktree_registry_cas_persister(repo_root, registry)
         warnings = governed_worktree_warning_lines(repo_root, manifest)
+        if stack:
+            _worktree_policy.admit_writers(
+                [item for item in registry['lanes'] if item.get('target') == stack['id']],
+                governed_worktree_owner(), effective_worktree_policy(repo_root),
+            )
         active = [
             item for item in registry['lanes']
             if item['state'] in {'active', 'captured_pending_cleanup'}
@@ -19964,6 +20000,13 @@ def command_hooks_worktree_guard(args):
     primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
     current_path = Path(git(repo_root, 'rev-parse', '--show-toplevel').stdout.strip()).resolve()
     if current_path != primary_root:
+        if args.event == 'pre-commit':
+            registry, _ = load_governed_worktree_registry(repo_root)
+            _worktree_policy.admit_writers(
+                [lane for lane in registry['lanes']
+                 if Path(lane['path']).resolve() == current_path],
+                governed_worktree_owner(), effective_worktree_policy(repo_root),
+            )
         return 0
     guard, guard_error = inspect_primary_guard(repo_root)
     branch = get_current_branch(primary_root)
@@ -20764,22 +20807,18 @@ def governed_worktree_preflight(args):
         return
     if scoped_stacks:
         registry, _ = load_governed_worktree_registry(repo_root)
-        blockers = [
-            lane for lane in registry['lanes']
-            if lane.get('target') in scoped_stacks and lane.get('state') != 'reaped'
-            # Intact lane whose tip is in a local recovery ref; only its remote
-            # save is pending, which never blocks the stack.
-            and lane.get('pending_reason') != 'archive_push_failed'
-        ]
+        health = {
+            lane['id']: lane
+            for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
+            if lane.get('id')
+        }
+        blockers = _worktree_policy.scoped_recovery_blockers(
+            [lane for lane in registry['lanes'] if lane.get('target') in scoped_stacks],
+            health, effective_worktree_policy(repo_root), governed_worktree_owner(),
+        )
         if blockers:
             # Name each lane's health and remedy: the warnings above may have
             # been collapsed into a summary line on a busy repository.
-            health = {
-                lane['id']: lane
-                for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
-                if lane.get('id')
-            }
-
             def describe(lane):
                 found = health.get(lane['id']) or {}
                 code = found.get('code') or lane.get('pending_reason') or lane.get('state')
@@ -21172,6 +21211,10 @@ def main():
         or (desk_release and not args.apply)
     )
     try:
+        if args.func == command_worktree_policy:
+            # Private preferences own no refs or lanes and must be configurable
+            # outside a repository, or while an existing lane needs recovery.
+            return command_worktree_policy(args)
         if args.func in {command_stack_sync, command_stack_absorb}:
             adopted_metadata = True
             observation = _READONLY_DIAGNOSTICS.set(True)
@@ -21382,6 +21425,7 @@ def command_handlers():
         'command_publish': command_publish,
         'command_reconcile': command_reconcile,
         'command_replay_mode': command_replay_mode,
+        'command_worktree_policy': command_worktree_policy,
         'command_repo_add': command_repo_add,
         'command_repo_authority_set': command_repo_authority_set,
         'command_repo_authority_status': command_repo_authority_status,
@@ -21582,6 +21626,9 @@ class _GovernedWorktreeRepository:
 
     def coordination_publication_lock_path(self, *args, **kwargs):
         return coordination_publication_lock_path(*args, **kwargs)
+
+    def effective_worktree_policy(self, repo_root):
+        return effective_worktree_policy(repo_root)
 
     def governed_lane_remedy(self, *args, **kwargs):
         return governed_lane_remedy(*args, **kwargs)

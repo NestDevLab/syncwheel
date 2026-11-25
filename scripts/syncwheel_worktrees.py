@@ -103,12 +103,14 @@ def governed_worktree_owner_is_dead(owner):
     return False
 
 
-def governed_worktree_lane_lease_expired(lane, now):
+def governed_worktree_lane_lease_expired(lane, now, expiry='enforced'):
+    if expiry == 'off':
+        return False
     expires = parse_coordination_timestamp(lane['lease_expires_at'])
     return bool(expires and expires <= now)
 
 
-def automatic_lane_cleanup_hold(lane, actor, now):
+def automatic_lane_cleanup_hold(lane, actor, now, expiry='enforced'):
     """Require a known owner and lease before automatic capture cleanup."""
     owner = lane.get('owner')
     expires = parse_coordination_timestamp(lane.get('lease_expires_at'))
@@ -120,7 +122,7 @@ def automatic_lane_cleanup_hold(lane, actor, now):
         actor.startswith('unknown@') and actor.endswith(':0')
     ):
         return 'current lane owner is unverified'
-    if owner != actor and expires > now:
+    if owner != actor and (expiry == 'off' or expires > now):
         return f'owner {owner} live'
     return None
 
@@ -301,6 +303,7 @@ class WorktreeStorage(Protocol):
 
 
 class WorktreeObserver(Protocol):
+    def effective_worktree_policy(self, repo_root): ...
     def governed_lane_remedy(self, manifest, lane, *, commit_first=False): ...
     def governed_worktree_registry_io_checkpoint(self, stage): ...
     def governed_worktree_cleanup_checkpoint(self, stage): ...
@@ -484,6 +487,7 @@ class GovernedWorktrees:
     def governed_worktree_lane_status(self, manifest, lane, now=None, manifest_path=None):
         repo_root = self.repository.root
         now = now or datetime.datetime.now(datetime.timezone.utc)
+        expiry = self.observer.effective_worktree_policy(repo_root)['expiry']
         root = self.governed_worktree_root(manifest)
         registered_path = Path(lane['path']).resolve(strict=False)
         worktree = self.repository.find_worktree_record_for_branch(repo_root, lane['branch'])
@@ -551,10 +555,10 @@ class GovernedWorktrees:
             if dirty:
                 status.update(code='dirty', remedy=self.observer.governed_lane_remedy(manifest, lane, commit_first=True))
                 return status
-            if governed_worktree_lane_lease_expired(lane, now):
+            if governed_worktree_lane_lease_expired(lane, now, expiry):
                 status.update(code='expired', remedy=self.observer.governed_lane_remedy(manifest, lane))
                 return status
-        elif governed_worktree_lane_lease_expired(lane, now) or governed_worktree_owner_is_dead(lane['owner']):
+        elif governed_worktree_lane_lease_expired(lane, now, expiry) or governed_worktree_owner_is_dead(lane['owner']):
             # An expired or dead owner cannot keep a missing path alive merely
             # because an old root configuration no longer contains that path.
             status.update(code='expired', remedy=self.observer.governed_lane_remedy(manifest, lane))
@@ -568,7 +572,7 @@ class GovernedWorktrees:
         expires = parse_coordination_timestamp(lane['lease_expires_at'])
         if expires is None:
             status.update(code='invalid_lease', remedy='repair the local registry before any cleanup')
-        elif governed_worktree_lane_lease_expired(lane, now):
+        elif governed_worktree_lane_lease_expired(lane, now, expiry):
             status.update(code='expired', remedy=self.observer.governed_lane_remedy(manifest, lane))
         return status
 
@@ -1095,6 +1099,7 @@ class GovernedWorktrees:
             expired = governed_worktree_lane_lease_expired(
                 lane,
                 datetime.datetime.now(datetime.timezone.utc),
+                self.observer.effective_worktree_policy(repo_root)['expiry'],
             )
             abandoned_missing = not path_exists and governed_worktree_owner_is_dead(lane['owner'])
             if not expired and not abandoned_missing:
@@ -1406,7 +1411,8 @@ class GovernedWorktrees:
     def automatic_cleanup_hold(self):
         actor = self.repository.governed_worktree_owner()
         now = datetime.datetime.now(datetime.timezone.utc)
-        return lambda lane: automatic_lane_cleanup_hold(lane, actor, now)
+        expiry = self.observer.effective_worktree_policy(self.repository.root)['expiry']
+        return lambda lane: automatic_lane_cleanup_hold(lane, actor, now, expiry)
 
     def capture_governed_worktrees_for_stack(self, manifest, stack_id, manifest_path=None):
         repo_root = self.repository.root

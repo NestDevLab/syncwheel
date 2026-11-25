@@ -6,6 +6,8 @@ argument parsers and behavior descriptions; it never imports command execution.
 
 import argparse
 
+from syncwheel_worktree_policy import POLICY_VALUES
+
 from syncwheel_contracts import (
     AUTHORITY_GRANTABLE_CLASSES,
     COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
@@ -25,6 +27,22 @@ from syncwheel_manifest import (
     REPLAY_MODE_CHOICES,
     SYNCWHEEL_TRACKING_VALUES,
 )
+
+
+def add_worktree_policy_parser(parent, commands, *, scope, common=None):
+    policy = parent.add_parser('worktree-policy', help='user defaults or private repository worktree policy')
+    actions = policy.add_subparsers(dest='policy_action', required=True)
+    for action in ('status', 'set', 'clear'):
+        parser = actions.add_parser(action, parents=[common] if common is not None else [])
+        parser.set_defaults(func=commands['command_worktree_policy'], policy_scope=scope)
+        parser.add_argument('-j', '--json', action='store_true')
+        if action == 'set':
+            for field, values in POLICY_VALUES.items():
+                parser.add_argument('--' + field.replace('_', '-'), choices=values)
+        if action == 'clear':
+            parser.add_argument('fields', nargs='*', choices=['expiry', 'writer-exclusivity'])
+        if action != 'status':
+            parser.add_argument('-a', '--apply', action='store_true')
 
 
 def add_rebuild_args(parser):
@@ -191,6 +209,8 @@ def build_parser(commands, version):
     repo_ls_p.add_argument('-j', '--json', action='store_true')
     repo_ls_p.set_defaults(func=commands['command_repo_ls'])
 
+    add_worktree_policy_parser(repo_sub, commands, scope='repo', common=common)
+
     repo_mode_p = repo_sub.add_parser('mode', help='migrate the repository delivery model')
     repo_mode_sub = repo_mode_p.add_subparsers(dest='mode_command', required=True)
     repo_mode_set_p = repo_mode_sub.add_parser('set', parents=[common])
@@ -267,6 +287,8 @@ def build_parser(commands, version):
 
     self_p = sub.add_parser('self', help='inspect or update the syncwheel installation itself')
     self_sub = self_p.add_subparsers(dest='self_command', required=True)
+
+    add_worktree_policy_parser(self_sub, commands, scope='global')
 
     self_status_p = self_sub.add_parser('status', help='show syncwheel install/update status')
     self_status_p.add_argument('-f', '--fetch', action='store_true', help='refresh remote tracking info before reporting')
@@ -1290,6 +1312,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         mutates='execute',
         manifest_mutates='update-manifest',
     )
+    register((commands['command_worktree_policy'],), mutates='apply')
     register((commands['command_self_mode'],), mutates='mode')
     register((commands['command_use'],), mutates='profile-selection')
     register((commands['command_replay_mode'],), mutates='mode-or-clear')

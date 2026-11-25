@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.48.0 - 2026-11-25
+
+- Add independent user defaults and private repository overrides for worktree lease expiry and logical writer admission, with previewed CLI updates and per-field inheritance. Preserve legacy behavior when unset, existing lane records, and physical Git, registry, publication and cleanup protections.
+
 ## 0.47.34 - 2026-11-24
 
 - Qualify independent publication with a tracked version 1 manifest: advance two existing feature refs while preserving another author's dirty worktree and interrupted cleanup. Keep the foreign-history refusal covered and document the materialized-source precondition and the separate limits of direct landing. Publication behavior is unchanged.
