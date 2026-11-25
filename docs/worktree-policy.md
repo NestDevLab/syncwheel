@@ -51,6 +51,14 @@ keys are preserved. Repository writes require an ignored, untracked profile.
 Status reports effective values, their sources, and both configured layers.
 These commands do not update lane records, refs, manifests, or coordination state.
 
+Configuration writes share a cooperative document lock and compare the exact
+bytes observed by the reader before replacement. This also covers existing
+update-mode, installation-identity and repository-profile writers. If another
+writer wins, the stale command stops without overwriting its changes; read the
+current configuration and rerun the intended update. Concurrent changes are
+never silently merged or discarded. Selecting `use --shared` removes only the
+personal selection and preserves other profile keys.
+
 ## Scope and limits
 
 `expiry off` stops treating a passed lease timestamp as expiration, including

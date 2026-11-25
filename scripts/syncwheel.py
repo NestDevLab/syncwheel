@@ -347,6 +347,7 @@ from syncwheel_coordination import (
 
 import syncwheel_cli as _cli
 import syncwheel_worktree_policy as _worktree_policy
+import syncwheel_private_json as _private_json
 from syncwheel_contracts import (
     AUTHORITY_GRANTABLE_CLASSES,
     COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
@@ -823,6 +824,27 @@ def save_json_file(path, data):
     return path
 
 
+def load_private_configuration(path, default):
+    return _private_json.load_document(path, default)
+
+
+def private_json_configuration_lock(path):
+    lock_path = path.with_name('.' + path.name + '.lock')
+    return exclusive_metadata_lock(
+        lock_path, label='private JSON configuration',
+        recovery_log_path=lock_path.with_name(lock_path.name + '-recovery.jsonl'),
+        timeout_seconds=5, stale_seconds=300,
+        busy_error=_private_json.configuration_busy_error,
+    )
+
+
+def save_private_configuration(path, data):
+    return _private_json.save_document(
+        path, data, lock=private_json_configuration_lock,
+        write_json=lambda destination, value: atomic_write_private_json(destination, value, indent=2),
+    )
+
+
 def parse_int(value, default):
     try:
         return int(value)
@@ -883,14 +905,14 @@ def set_update_mode(mode):
     if mode not in UPDATE_MODES:
         raise SyncwheelError(f'unknown update mode: {mode}')
     path = get_settings_path()
-    data = load_json_file(path, {})
+    data = load_private_configuration(path, {})
     update = data.get('update')
     if update is None or not isinstance(update, dict):
         update = {}
     update['mode'] = mode
     update.setdefault('check_interval_seconds', DEFAULT_UPDATE_INTERVAL_SECONDS)
     data['update'] = update
-    save_json_file(path, data)
+    save_private_configuration(path, data)
     return path
 
 
@@ -5281,14 +5303,10 @@ def repo_profile_path(repo_root):
 
 def load_repo_profile(repo_root):
     path = repo_profile_path(repo_root)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise SyncwheelError(f'invalid syncwheel profile JSON: {path}: {exc}') from exc
-    if not isinstance(data, dict):
-        raise SyncwheelError(f'syncwheel profile must be an object: {path}')
+    data = _private_json.load_document(
+        path, {}, invalid_label='invalid syncwheel profile JSON',
+        root_label='syncwheel profile must be an object',
+    )
     personal = data.get('personal')
     if personal is not None:
         if not isinstance(personal, str) or not personal.strip():
@@ -5309,7 +5327,7 @@ def checked_repo_profile_path(repo_root):
 
 
 def save_repo_profile(repo_root, profile):
-    return atomic_write_private_json(checked_repo_profile_path(repo_root), profile, indent=2)
+    return save_private_configuration(checked_repo_profile_path(repo_root), profile)
 
 
 def worktree_policy_root(repo_root):
@@ -5337,8 +5355,8 @@ def command_worktree_policy(args):
         options = dict(profile_path=path, load_profile=lambda: load_repo_profile(root),
                        write_profile=lambda value: save_repo_profile(root, value))
     return _worktree_policy.run_policy_command(
-        args, settings_path=get_settings_path(), load_json=load_json_file,
-        write_json=atomic_write_private_json, **options,
+        args, settings_path=get_settings_path(), load_json=load_private_configuration,
+        write_json=save_private_configuration, **options,
     )
 
 
@@ -5493,7 +5511,7 @@ def ensure_github_pr_merge_policy_is_private(repo_root):
 def github_pr_merge_policy_edit(repo_root, proposed, *, apply, clear=False, json_mode=False):
     ensure_github_pr_merge_policy_is_private(repo_root)
     current_profile = load_repo_profile(repo_root)
-    next_profile = dict(current_profile)
+    next_profile = copy.deepcopy(current_profile)
     if clear:
         next_profile.pop(GITHUB_PR_MERGE_POLICY_KEY, None)
     else:
@@ -7073,7 +7091,7 @@ def coordination_profile(repo_root):
 
 def installation_id(create=False):
     path = get_settings_path()
-    data = load_json_file(path, {})
+    data = load_private_configuration(path, {})
     identity = data.get('installation')
     if identity is None:
         identity = {}
@@ -7089,7 +7107,7 @@ def installation_id(create=False):
     value = str(uuid.uuid4())
     identity['id'] = value
     data['installation'] = identity
-    save_json_file(path, data)
+    save_private_configuration(path, data)
     return value
 
 
@@ -12781,9 +12799,9 @@ def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id, manifest
 def command_use(args):
     repo_root = resolve_repo_root(args.repo)
     if args.shared:
-        path = repo_profile_path(repo_root)
-        if path.exists():
-            path.unlink()
+        profile = load_repo_profile(repo_root)
+        profile.pop('personal', None)
+        save_repo_profile(repo_root, profile)
         print('using shared manifest')
         return 0
     if not args.personal:
