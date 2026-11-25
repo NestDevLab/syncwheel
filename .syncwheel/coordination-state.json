@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/worktree-user-policies": "94818c119c1a3f325d38155800cab242f2e3750e"
+    "refs/heads/pr/worktree-user-policies": "3ba1bb01a950d6914e62bba5fb4b6ab3de5e0fa6"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -87,7 +87,7 @@
     "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
     "refs/heads/pr/stack-target": "19372a7c1f48091a1cc0ef397c00acf380b766c4",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
-    "refs/heads/pr/worktree-user-policies": "71dc1ade17af50549cbf5862377d5aa81519f5f0",
+    "refs/heads/pr/worktree-user-policies": "8e049d244196635ca8817d0f3ec9d03967ba1ef2",
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "b1f616e3fb8aff14a85e5ef3fca787e7fa6b3bca",
     "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "58b2e3172c7c08ff931be56bcef9937e49281a10",
     "refs/heads/syncwheel/draft/close-published-recovery": "910530df66c2e9913de1427e074df6f862224b68",
@@ -126,7 +126,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-25T19:23:40+00:00",
+  "created_at": "2026-11-25T19:41:10+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -232,7 +232,7 @@
     "refs/heads/pr/stack-target": "6f1fc012199cfe8d2d70d68d21ec4089f29759b8",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
     "refs/heads/pr/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68",
-    "refs/heads/pr/worktree-user-policies": "94818c119c1a3f325d38155800cab242f2e3750e",
+    "refs/heads/pr/worktree-user-policies": "3ba1bb01a950d6914e62bba5fb4b6ab3de5e0fa6",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "3b82631f3e1eb4d1a230168a2d996cdc515c1b49",
     "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "ad9429917327a40a7d300593c8116904d2e561a3",
@@ -562,7 +562,8 @@
         "commits": [
           "0e37cdb21286d198c36860dd537e71f43c7bc4c9",
           "cc84fbbfd1e5720aa34b72e4cabcb2b6ed051845",
-          "94818c119c1a3f325d38155800cab242f2e3750e"
+          "94818c119c1a3f325d38155800cab242f2e3750e",
+          "3ba1bb01a950d6914e62bba5fb4b6ab3de5e0fa6"
         ],
         "id": "worktree-user-policies",
         "integration_branch": "main-integration",
@@ -572,10 +573,10 @@
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "e0033131-f13c-4784-a48d-efd843dd43e3",
-  "parent_state": "dedb5622e16426512498a04c31dd02e8cccb7aaf",
+  "operation_token": "7057f24d-f55e-4c05-8cf3-c4618e5d7684",
+  "parent_state": "dc69e0408b3ff6d91b002beb31ab0f7da315051f",
   "projection_status": "partial",
-  "publication_id": "c70697c6-a0d9-4688-8312-4fa0feca5e92",
+  "publication_id": "b0915d60-95ee-4e0a-9dc3-d61ddcf9232b",
   "publication_scope": "compose-stack:worktree-user-policies",
   "schema_version": 5,
   "syncwheel_version": "0.47.34",
