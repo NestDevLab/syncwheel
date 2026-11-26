@@ -7325,12 +7325,9 @@ with module.coordination_publication_lock(Path(repo_path)):
                     remote_integration_tree,
                 )
                 self.assertIsNotNone(failure)
-                expected_failure = (
-                    'reviewed plan drifted'
-                    if suffix_kind == 'manifest'
-                    else 'linear manifest-only control suffix'
-                )
-                self.assertIn(expected_failure, failure)
+                # Both local control and product changes invalidate the exact
+                # local HEAD bound by the reviewed selective plan.
+                self.assertIn('reviewed plan drifted', failure)
 
     def test_scoped_compose_requires_control_target_and_diagnoses_its_projection(self):
         for relation in ('missing', 'behind', 'diverged'):
