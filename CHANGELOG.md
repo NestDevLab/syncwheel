@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.52.1 - 2026-11-26
+
+- Honor automatic update mode off before startup refresh, fetch or cache writes. Reuse one settings snapshot per startup, preserve explicit self commands and concurrent configuration writers, and isolate startup decisions in their owning module.
+
 ## 0.52.0 - 2026-11-26
 
 - Add cooperative native test-slot reservations and retained-unit recovery, deriving reproducible channel input provenance from immutable control blobs and existing replay contracts. Keep caller observations distinct, isolate job inputs and outputs, and qualify physical release separately from test success.
