@@ -21,12 +21,12 @@ LANE_POLICY_KEY = 'lane_worktree_policies'
 
 
 def policy_values(document, label):
-    return configuration_values(document, label, fields=WORKTREE_FIELDS, allow_presets=False)
+    return configuration_values(document, label, fields=WORKTREE_FIELDS, allow_presets=True)
 
 
 def resolve_policy(global_document, repo_document=None, *, lane_document=None):
     report = resolve_preferences(global_document, repo_document, lane_document,
-                                 fields=WORKTREE_FIELDS, allow_presets=False)
+                                 fields=WORKTREE_FIELDS, allow_presets=True)
     keys = ('effective', 'sources', 'global', 'repo')
     if lane_document is not None:
         keys += ('lane',)
@@ -72,7 +72,7 @@ def lane_document(profile, binding):
         return {}, report
     selected = {POLICY_KEY: entry.get(POLICY_KEY, {})}
     try:
-        policy_values(selected, 'lane')
+        configuration_values(selected, 'lane')
     except SyncwheelError:
         report['state'] = 'invalid'
         return {}, report
@@ -103,7 +103,7 @@ def effective_for_context(global_document, profile, *, lane=None, lane_generatio
     return result
 
 
-def edit_lane_policy(profile, binding, *, values=None, clear=(), bind_generation=None):
+def edit_lane_policy(profile, binding, *, values=None, clear=(), bind_generation=None, execution=False):
     selected, report = lane_document(profile, binding)
     if values and (not isinstance(binding['generation_token'], str) or not binding['generation_token']):
         raise SyncwheelError('lane preference updates require a current registry generation')
@@ -118,7 +118,7 @@ def edit_lane_policy(profile, binding, *, values=None, clear=(), bind_generation
     entries = copy.deepcopy(lane_entries(profile))
     if clear and report['state'] in {'stale', 'invalid', 'missing'}:
         # Clear-all can retire an obsolete binding without reactivating it.
-        if set(clear) == set(POLICY_VALUES):
+        if set(clear) == set((*FIELD_VALUES, 'preset') if execution else POLICY_VALUES):
             entries.pop(binding['id'], None)
         else:
             entry = entries.get(binding['id'])
@@ -131,7 +131,7 @@ def edit_lane_policy(profile, binding, *, values=None, clear=(), bind_generation
             if not entry[POLICY_KEY]:
                 entries.pop(binding['id'], None)
     else:
-        updated = edit_policy(selected, values=values, clear=clear)
+        updated = edit_policy(selected, values=values, clear=clear, execution=execution)
         if updated.get(POLICY_KEY):
             entries[binding['id']] = {
                 'generation_token': binding['generation_token'],
@@ -158,9 +158,10 @@ def save_bound_lane_profile(proposed, binding, *, registry_lock, load_lanes,
         write_profile(proposed)
 
 
-def edit_policy(document, *, values=None, clear=()):
+def edit_policy(document, *, values=None, clear=(), execution=False):
     proposed = copy.deepcopy(document)
-    policy = policy_values(proposed, 'configuration')
+    configuration_values(proposed, 'configuration')
+    policy = dict(proposed.get(POLICY_KEY, {}))
     policy.update(values or {})
     for field in clear:
         policy.pop(field, None)
@@ -168,19 +169,22 @@ def edit_policy(document, *, values=None, clear=()):
         proposed[POLICY_KEY] = policy
     else:
         proposed.pop(POLICY_KEY, None)
-    policy_values(proposed, 'configuration')
+    configuration_values(proposed, 'configuration')
     return proposed
 
 
 def run_policy_command(args, *, settings_path, load_json, write_json,
                        profile_path=None, load_profile=None, write_profile=None,
-                       registry_lock=None, load_lanes=None, lane_generation=None):
+                       registry_lock=None, load_lanes=None, lane_generation=None, context_report=None):
     """Edit only the selected private configuration, preserving other keys."""
     global_document = load_json(settings_path, {})
     repo_document = load_profile() if profile_path is not None else None
     is_global = args.policy_scope == 'global'
     is_lane = args.policy_scope == 'lane'
     operation = args.policy_action
+    execution = getattr(args, 'execution_policy', False)
+    fields = FIELD_VALUES if execution else POLICY_VALUES
+    resolve = resolve_preferences if execution else resolve_policy
     if is_lane:
         selected_lane = require_lane(
             load_lanes(), args.lane, allow_reaped=operation != 'set', allow_missing=operation != 'set',
@@ -189,6 +193,11 @@ def run_policy_command(args, *, settings_path, load_json, write_json,
             'id': args.lane,
             'generation_token': lane_generation(selected_lane) if selected_lane is not None else None,
         }
+    if execution and operation in {'record', 'release-status'}:
+        from syncwheel_execution_policy import run_evidence_command
+        return run_evidence_command(args, profile=repo_document, write_profile=write_profile,
+                                    report=(context_report() if context_report is not None and operation == 'release-status' else
+                                            resolve_preferences(global_document, repo_document)))
     path = settings_path if is_global else profile_path
     current = global_document if is_global else repo_document
     if (is_lane and lane_binding['generation_token'] is None
@@ -196,23 +205,29 @@ def run_policy_command(args, *, settings_path, load_json, write_json,
         raise SyncwheelError('no current lane or stored override with this id')
     proposed = current
     if operation == 'set':
-        values = {field: getattr(args, field) for field in POLICY_VALUES
+        values = {field: getattr(args, field) for field in fields
                   if getattr(args, field, None) is not None}
+        if execution and getattr(args, 'preset', None) is not None:
+            values['preset'] = args.preset
         if not values:
-            raise SyncwheelError('worktree-policy set requires --expiry or --writer-exclusivity')
+            raise SyncwheelError('policy set requires a preference field or --preset')
         proposed = (edit_lane_policy(current, lane_binding, values=values,
-                                     bind_generation=getattr(args, 'bind_generation', None))
-                    if is_lane else edit_policy(current, values=values))
+                                     bind_generation=getattr(args, 'bind_generation', None), execution=execution)
+                    if is_lane else edit_policy(current, values=values, execution=execution))
     elif operation == 'clear':
-        fields = [field.replace('-', '_') for field in args.fields] or list(POLICY_VALUES)
-        proposed = (edit_lane_policy(current, lane_binding, clear=fields)
-                    if is_lane else edit_policy(current, clear=fields))
-    report = resolve_policy(proposed if is_global else global_document,
+        fields = [field.replace('-', '_') for field in args.fields] or list(fields) + (['preset'] if execution else [])
+        proposed = (edit_lane_policy(current, lane_binding, clear=fields, execution=execution)
+                    if is_lane else edit_policy(current, clear=fields, execution=execution))
+    report = resolve(proposed if is_global else global_document,
                             repo_document if is_global else proposed)
     if is_lane:
         selected, binding_report = lane_document(proposed, lane_binding)
-        report = resolve_policy(global_document, proposed, lane_document=selected)
+        report = (resolve_preferences(global_document, proposed, selected) if execution else
+                  resolve_policy(global_document, proposed, lane_document=selected))
         report['lane_binding'] = binding_report
+    if execution and not is_global:
+        from syncwheel_execution_policy import merge_preferences
+        report = merge_preferences(report, proposed)
     report.update(scope=args.policy_scope, path=str(path), applied=False)
     if operation != 'status':
         report['proposed'] = proposed

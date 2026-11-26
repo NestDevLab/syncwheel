@@ -347,6 +347,7 @@ from syncwheel_coordination import (
 
 import syncwheel_cli as _cli
 import syncwheel_worktree_policy as _worktree_policy
+import syncwheel_execution_policy as _execution_policy
 import syncwheel_private_json as _private_json
 from syncwheel_contracts import (
     AUTHORITY_GRANTABLE_CLASSES,
@@ -5346,18 +5347,31 @@ def effective_worktree_policy(repo_root, *, lane=None, current_context=True):
     )['effective']
 
 
+def execution_policy_report(repo_root):
+    return _execution_policy.resolve_context(
+        load_json_file(get_settings_path(), {}),
+        load_repo_profile(worktree_policy_root(repo_root)),
+        lane_generation=governed_worktree_generation_token,
+        checkout_path=Path(repo_root).resolve(),
+        load_lanes=lambda: load_governed_worktree_registry(repo_root)[0]['lanes'],
+        normalize_path=lambda path: Path(path).resolve(),
+    )
+
+
 def command_worktree_policy(args):
     options = {}
     if args.policy_scope in {'repo', 'lane'}:
-        root = worktree_policy_root(resolve_repo_root(args.repo))
+        selected_checkout = resolve_repo_root(args.repo)
+        root = worktree_policy_root(selected_checkout)
         path = checked_repo_profile_path(root)
-        if args.policy_action != 'status' and (git_path_is_tracked(root, path) or git(
+        if args.policy_action not in {'status', 'release-status'} and (git_path_is_tracked(root, path) or git(
             root, 'check-ignore', '--quiet', '--no-index', '--',
             '.syncwheel/profile.local.json', check=False,
         ).returncode != 0):
             raise SyncwheelError('worktree policy profile must be ignored and untracked')
         options = dict(profile_path=path, load_profile=lambda: load_repo_profile(root),
-                       write_profile=lambda value: save_repo_profile(root, value))
+                       write_profile=lambda value: save_repo_profile(root, value),
+                       context_report=lambda: execution_policy_report(selected_checkout))
         if args.policy_scope == 'lane':
             options.update(
                 registry_lock=lambda: governed_worktree_registry_lock(root),
@@ -6042,7 +6056,10 @@ def resolve_repository_authority(repo_root, manifest, manifest_path):
 
 def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, args):
     require_delivery_manifest(manifest)
-    policy = github_pr_merge_policy_from_profile(load_repo_profile(repo_root))
+    local_profile = load_repo_profile(repo_root)
+    policy = github_pr_merge_policy_from_profile(local_profile)
+    execution_report = execution_policy_report(repo_root)
+    operational_preferences = _execution_policy.operational_selected(execution_report)
     if policy is None:
         raise SyncwheelError('GitHub PR merge policy is missing or invalid; configure profile.local.json first')
     if not policy['enabled']:
@@ -6050,6 +6067,13 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     authority, authority_provenance = resolve_repository_authority(repo_root, manifest, manifest_path)
     if authority['mode'] != AUTHORITY_MODE_AI_MANAGED or AUTHORITY_CLASS_SOURCE_CHANGE not in authority['allow']:
         raise SyncwheelError('GitHub PR merge requires authority.mode=ai-managed with source_change allowed')
+    execution_report = _execution_policy.merge_preferences(execution_report, local_profile)
+    policy = _execution_policy.optional_merge_policy(policy, operational=operational_preferences)
+    selected_preferences = execution_report['effective']
+    if selected_preferences['checks'] != 'legacy':
+        policy['checks'] = selected_preferences['checks']
+    if selected_preferences['integration_validation'] != 'legacy':
+        policy['integration'] = selected_preferences['integration_validation']
     stack = require_stack(manifest, stack_id)
     blockers = []
     warnings = []
@@ -6101,11 +6125,20 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     if isinstance(observation, dict) and observation.get('repository', '').casefold() != policy['repository'].casefold():
         github_blocker(blockers, 'repository_mismatch', 'observed repository differs from local policy')
     actor = identity.get('login') if isinstance(identity, dict) else None
-    if not isinstance(actor, str) or actor.casefold() not in {item.casefold() for item in policy['merge_actors']}:
+    if not isinstance(actor, str) or not actor.strip():
+        github_blocker(blockers, 'merge_actor_unknown', 'effective gh actor was not observed', actor=actor)
+    elif not operational_preferences and actor.casefold() not in {item.casefold() for item in policy['merge_actors']}:
         github_blocker(blockers, 'merge_actor_not_allowed', 'effective gh actor is not allowlisted', actor=actor)
     permissions = repository_info.get('permissions') if isinstance(repository_info, dict) else {}
-    if not isinstance(permissions, dict) or permissions.get('admin') is not True:
-        github_blocker(blockers, 'merge_actor_not_admin', 'effective gh actor has no repository admin permission')
+    permitted = isinstance(permissions, dict) and (
+        permissions.get('admin') is True or (operational_preferences and any(
+            permissions.get(field) is True for field in ('push', 'maintain')
+        ))
+    )
+    if not permitted:
+        github_blocker(blockers, 'merge_actor_permission_missing' if operational_preferences else 'merge_actor_not_admin',
+                       'effective gh actor has no verified repository write permission' if operational_preferences else
+                       'effective gh actor has no repository admin permission')
     checks, superseded_checks = [], []
     if isinstance(pr, dict):
         if pr_number is not None and pr.get('number') != int(pr_number):
@@ -6157,7 +6190,28 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             github_blocker(blockers, 'base_obsolete_or_dirty', f"mergeStateStatus={pr.get('mergeStateStatus')}")
         head = pr.get('headRefOid')
         checks, superseded_checks = github_effective_checks(pr.get('checks') or [], head)
+        changed_paths = git(repo_root, 'diff', '--name-only', stack.get('base'), source_revision, '--').stdout.splitlines() if source_revision else []
+        sensitive = _execution_policy.sensitive_paths(changed_paths)
+        evidence_blockers, candidate_evidence = _execution_policy.candidate_gates(
+            execution_report, load_repo_profile(worktree_policy_root(repo_root)), head,
+            sensitive=sensitive, checks=checks,
+            successful_check=lambda item, sha: github_ci_check_result(item, sha) == 'SUCCESS',
+        )
+        blockers.extend(evidence_blockers)
         required_checks = github_required_checks(rules)
+        if required_checks:
+            execution_report = _execution_policy.apply_required_floor(
+                execution_report, {'checks': 'required'}, authority='observed forge status-check rules',
+            )
+            if operational_preferences:
+                policy['checks'] = execution_report['effective']['checks']
+        execution_report['mandatory'] = {
+            'forge_checks': [{'name': name, 'provider': provider} for name, provider in required_checks],
+            'forge_review': github_rule_review_required(rules),
+            'integration_membership': manifest['defaults'].get('integration_membership') == INTEGRATION_MEMBERSHIP_REQUIRED,
+            'sources': {'forge_checks': 'observed forge rules', 'forge_review': 'observed forge rules',
+                        'integration_membership': 'manifest.defaults.integration_membership'},
+        }
         if pr.get('checksIncomplete') is True and (policy['checks'] == 'all' or required_checks):
             github_blocker(blockers, 'checks_observation_incomplete', 'exact-head check history could not be observed')
         if policy['checks'] == 'all':
@@ -6170,7 +6224,8 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         else:
             warnings.append({
                 'code': 'checks_not_required',
-                'detail': 'the clone-local merge policy does not require CI checks',
+                'detail': ('only forge-required CI checks are required' if policy['checks'] == 'required'
+                           else 'the clone-local merge policy does not require optional CI checks'),
             })
         for name, provider in required_checks:
             named = [
@@ -6279,6 +6334,10 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'command': command,
         'adapterRequest': request,
         'policy': policy,
+        'executionPolicy': execution_report,
+        'operationalPreferencesActive': operational_preferences,
+        'candidateEvidence': candidate_evidence if isinstance(pr, dict) else {},
+        'releaseEvidence': _execution_policy.release_status(execution_report, load_repo_profile(worktree_policy_root(repo_root)), source_revision),
         'authority': authority,
         'authorityProvenance': authority_provenance,
         'source': {'branch': stack.get('branch'), 'revision': source_revision, 'base': stack.get('base'), 'commits': declared},

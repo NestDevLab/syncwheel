@@ -118,15 +118,15 @@ class PolicyResolutionTest(unittest.TestCase):
                     inputs[level + '_document'] = malformed
                     resolve_preferences(**inputs)
 
-    def test_existing_worktree_api_keeps_its_schema_and_refuses_unwired_presets(self):
+    def test_existing_worktree_api_keeps_its_schema_and_projects_wired_presets(self):
         result = resolve_policy(document(expiry='off'), document(writer_exclusivity='block'))
         self.assertEqual(result, {
             'effective': {'expiry': 'off', 'writer_exclusivity': 'block'},
             'sources': {'expiry': 'global', 'writer_exclusivity': 'repo'},
             'global': {'expiry': 'off'}, 'repo': {'writer_exclusivity': 'block'},
         })
-        with self.assertRaises(SyncwheelError):
-            resolve_policy(document(preset='minimal'))
+        self.assertEqual(resolve_policy(document(preset='minimal'))['effective'],
+                         {'expiry': 'off', 'writer_exclusivity': 'warn'})
 
 
 if __name__ == '__main__':

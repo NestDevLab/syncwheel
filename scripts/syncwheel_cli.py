@@ -7,6 +7,7 @@ argument parsers and behavior descriptions; it never imports command execution.
 import argparse
 
 from syncwheel_worktree_policy import POLICY_VALUES
+from syncwheel_policy import FIELD_VALUES
 
 from syncwheel_contracts import (
     AUTHORITY_GRANTABLE_CLASSES,
@@ -36,26 +37,41 @@ def worktree_policy_field(value):
     return value
 
 
-def add_worktree_policy_parser(parent, commands, *, scope, common=None, name='worktree-policy'):
-    policy = parent.add_parser(name, help='user, repository or lane worktree preferences')
+def execution_policy_field(value):
+    if value not in ('preset', *(field.replace('_', '-') for field in FIELD_VALUES)):
+        raise argparse.ArgumentTypeError('unknown execution policy field: ' + value)
+    return value
+
+
+def add_worktree_policy_parser(parent, commands, *, scope, common=None, name='worktree-policy', execution=False):
+    policy = parent.add_parser(name, help='user, repository or lane preferences')
+    fields = FIELD_VALUES if execution else POLICY_VALUES
     if scope == 'lane':
         policy.add_argument('lane', help='stable governed lane id')
     actions = policy.add_subparsers(dest='policy_action', required=True)
-    for action in ('status', 'set', 'clear'):
+    operations = ('status', 'set', 'clear', 'record', 'release-status') if execution and scope == 'repo' else ('status', 'set', 'clear')
+    for action in operations:
         parser = actions.add_parser(action, parents=[common] if common is not None else [])
-        parser.set_defaults(func=commands['command_worktree_policy'], policy_scope=scope)
+        parser.set_defaults(func=commands['command_worktree_policy'], policy_scope=scope, execution_policy=execution)
         parser.add_argument('-j', '--json', action='store_true')
+        if action == 'record':
+            parser.add_argument('--receipt', action='append', required=True, help='explicit operator-verified JSON receipt')
+        if action == 'release-status':
+            parser.add_argument('--head', required=True, help='exact candidate commit SHA')
         if action == 'set':
             if scope == 'lane':
                 parser.add_argument('--bind-generation', help='explicitly bind new overrides to this current generation')
-            for field, values in POLICY_VALUES.items():
+            if execution:
+                parser.add_argument('--preset', choices=('disabled', 'minimal'))
+            for field, values in fields.items():
                 parser.add_argument('--' + field.replace('_', '-'), choices=values)
         if action == 'clear':
             # Python 3.11 applies choices to the empty list for nargs='*'.
             # Validate each supplied field instead, preserving clear-all.
-            parser.add_argument('fields', nargs='*', type=worktree_policy_field, metavar='FIELD',
-                                help='expiry or writer-exclusivity; omit to clear both')
-        if action != 'status':
+            parser.add_argument('fields', nargs='*', type=(execution_policy_field if execution else worktree_policy_field), metavar='FIELD',
+                                help=('preference field or preset; omit to clear this scope' if execution else
+                                      'expiry or writer-exclusivity; omit to clear both'))
+        if action not in {'status', 'release-status'}:
             parser.add_argument('-a', '--apply', action='store_true')
 
 
@@ -224,6 +240,7 @@ def build_parser(commands, version):
     repo_ls_p.set_defaults(func=commands['command_repo_ls'])
 
     add_worktree_policy_parser(repo_sub, commands, scope='repo', common=common)
+    add_worktree_policy_parser(repo_sub, commands, scope='repo', common=common, name='execution-policy', execution=True)
 
     repo_mode_p = repo_sub.add_parser('mode', help='migrate the repository delivery model')
     repo_mode_sub = repo_mode_p.add_subparsers(dest='mode_command', required=True)
@@ -303,6 +320,7 @@ def build_parser(commands, version):
     self_sub = self_p.add_subparsers(dest='self_command', required=True)
 
     add_worktree_policy_parser(self_sub, commands, scope='global')
+    add_worktree_policy_parser(self_sub, commands, scope='global', name='execution-policy', execution=True)
 
     self_status_p = self_sub.add_parser('status', help='show syncwheel install/update status')
     self_status_p.add_argument('-f', '--fetch', action='store_true', help='refresh remote tracking info before reporting')
@@ -545,6 +563,7 @@ def build_parser(commands, version):
     worktree_p = sub.add_parser('worktree', aliases=['wt'], help='manage governed local worktrees and safety locks')
     worktree_sub = worktree_p.add_subparsers(dest='worktree_command', required=True)
     add_worktree_policy_parser(worktree_sub, commands, scope='lane', common=common, name='policy')
+    add_worktree_policy_parser(worktree_sub, commands, scope='lane', common=common, name='execution-policy', execution=True)
 
     worktree_open_p = worktree_sub.add_parser('open', parents=[common])
     worktree_open_p.add_argument('lane')
