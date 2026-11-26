@@ -981,18 +981,7 @@ class ReplayEngine:
         temporary_ref = f'refs/heads/{temporary_branch}'
         if self.repository.ref_tip(repo_root, temporary_ref):
             raise SyncwheelError(f'temporary channel build ref already exists: {temporary_ref}')
-        commits = [
-            commit
-            for entry in channel.get('composition', [])
-            for commit in entry.get('commits', [])
-            if not self.repository.branch_contains(repo_root, channel['baseRevision'], commit)
-        ]
-        synthetic = {
-            'id': f"channel-{channel['id']}",
-            'branch': temporary_branch,
-            'base': channel['baseRevision'],
-            'commits': commits,
-        }
+        synthetic = self.channel_projection_stack(channel, temporary_branch)
         mode = 'plumbing' if self.git_supports_write_tree() else 'ephemeral'
         replay = self.replay_plan(None, replay_target(stack=synthetic), mode)
         try:
@@ -1006,7 +995,28 @@ class ReplayEngine:
         finally:
             self.repository.git(repo_root, 'update-ref', '-d', temporary_ref, check=False)
 
-    def materialize_stack_projection(self, stack):
+    def channel_projection_stack(self, channel, branch):
+        repo_root = self.repository.root
+        commits = [
+            commit
+            for entry in channel.get('composition', [])
+            for commit in entry.get('commits', [])
+            if not self.repository.branch_contains(repo_root, channel['baseRevision'], commit)
+        ]
+        return {'id': f"channel-{channel['id']}", 'branch': branch,
+                'base': channel['baseRevision'], 'commits': commits}
+
+    def materialize_channel_tree(self, channel):
+        """Project selected immutable pins without updating a channel/build ref."""
+        resolution = channel.get('resolution')
+        if resolution:
+            return self.repository.ref_tree(self.repository.root, resolution['revision'])
+        stack = self.channel_projection_stack(channel, channel['branch'])
+        if not stack['commits']:
+            return self.repository.ref_tree(self.repository.root, channel['baseRevision'])
+        return self.materialize_stack_projection(stack, skip_contained=False)
+
+    def materialize_stack_projection(self, stack, *, skip_contained=True):
         repo_root = self.repository.root
         with tempfile.TemporaryDirectory(prefix='syncwheel-stack-projection-') as tmp:
             plan = self.replay_plan(
@@ -1015,7 +1025,7 @@ class ReplayEngine:
                     stack=stack,
                     worktree=Path(tmp),
                     return_tree=True,
-                    skip_contained=True,
+                    skip_contained=skip_contained,
                 ),
                 'desk',
             )

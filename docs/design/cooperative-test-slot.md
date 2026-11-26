@@ -1,7 +1,7 @@
 # Cooperative test-slot qualification packet
 
-Status: proposal. This does not claim an installed runner or completed slot
-qualification. The first implementation targets reviewed cooperative local jobs
+Status: source candidate. Packaging and installed-slot qualification remain
+separate evidence stages. The first implementation targets reviewed cooperative local jobs
 on disposable repositories, without application services or a general sandbox.
 
 ## Reuse and boundaries
@@ -133,11 +133,48 @@ second reservation file. It verifies physical workspace and administration
 identity, and the worker rechecks the selected inputs after the durable startup
 handshake. Uncertain terminal observations stop recovery without releasing.
 
-The request contains caller-reviewed plan/composition metadata, command,
-environment and tool labels. The prototype does not yet independently derive or
-validate all those labels against their owning channel source. A qualified
-native invocation is not automatically a trusted CI, review, landing or
-installation attestation; no existing landing consumer reads these receipts.
-This provenance boundary, packaging and an installed-package run remain open
-before the prototype can be accepted for the controlled pilot. Native lifecycle
-fixture success alone does not close that work.
+The request contains the existing `channel_plan` object, a `manifest_blob`
+Git object id, literal `argv`, an explicit `environment`, and optional
+`observations`. Capture the control manifest as an immutable Git blob in the
+slot repository's object store; no commit or shared integration rebuild is
+required for that capture. The adapter verifies the object bytes, normalizes
+with the canonical manifest contract, checks the plan digest and channel
+pin/dependency/resolution identities, and verifies the selected Git history.
+
+The worker starts only after its InvocationID and live cgroup are durably
+bound. `Restart=no` prevents implicit redispatch. It rechecks workspace/admin/
+index identity and its observed tools, then uses the existing ReplayEngine
+projection inside the same unit before executing the selected test command.
+A discordant tree fails qualification before the test command; all preparatory
+Git children remain owned by the unit. CPU and memory accounting are explicit.
+
+Caller observations and the plan's moving-ref observations remain reported,
+not authenticated facts about a forge, reviewer or source author. The observed
+tool inventory covers the controller modules/tools and command entrypoint;
+payload descendants remain caller-controlled cooperative code. Neither the
+slot receipt nor a successful materialization manufactures a CI, review,
+landing or installation approval.
+
+Use a clean, detached candidate worktree whose local channel ref identifies the
+candidate. Ignored/untracked residue is not silently reused. Job HOME, XDG,
+temporary and output roots are private; direct outputs to
+`SYNCWHEEL_TEST_OUTPUT`. Controlled bytecode/read-only Git settings prevent
+incidental candidate/index writes. A changed input or residue is reported,
+never silently reset or deleted.
+
+```sh
+syncwheel-test-slot inspect "$slot_workspace" request.json
+syncwheel-test-slot run "$slot_workspace" request.json --timeout 300
+syncwheel-test-slot recover "$slot_workspace" RECORDED_NONCE
+syncwheel-test-slot cleanup "$slot_workspace" RECORDED_NONCE
+```
+
+`inspect` derives verified request fields without dispatch. `run` records the
+reservation before starting a nonce-owned unit. `recover` observes that same
+unit, never launches another. Receipt/release is one CAS operation after
+verified physical termination; failed qualification can release a physically
+idle slot while retaining its failure. `cleanup` requires that committed
+receipt and matching unit configuration. Missing native process evidence
+remains unknown and occupied. Prepared inputs, logs and unexplained residue
+are retained for explicit disposition. Aggregate resource-budget enforcement
+and controlled-pilot adoption are separate qualifications.

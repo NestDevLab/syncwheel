@@ -10,12 +10,13 @@ import json
 import os
 from pathlib import Path
 import stat
+import shutil
 import subprocess
 import sys
 import time
 
 from syncwheel_errors import SyncwheelError
-from syncwheel_test_slot import CooperativeTestSlot
+from syncwheel_test_slot import CooperativeTestSlot, derive_channel_request
 
 
 def command(argv, *, cwd=None, env=None):
@@ -35,11 +36,13 @@ def workspace_observation(path):
     if selectors.intersection(os.environ) or any(key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_')) for key in os.environ):
         raise SyncwheelError('test-slot Git observation requires an environment without Git selectors')
     root = Path(path).resolve(strict=True)
-    git = lambda *args: command(['git', *args], cwd=root)
+    git = lambda *args: command(['git', '--no-optional-locks', *args], cwd=root)
     if Path(git('rev-parse', '--show-toplevel')).resolve() != root:
         raise SyncwheelError('test slot must name the exact physical workspace root')
     admin = Path(git('rev-parse', '--absolute-git-dir')).resolve(strict=True)
     physical = root.stat()
+    index = Path(git('rev-parse', '--path-format=absolute', '--git-path', 'index'))
+    index_digest = hashlib.sha256(index.read_bytes()).hexdigest() if index.exists() else None
     lockfiles = {}
     for relative in git('ls-files', '-z').split('\0'):
         if relative and Path(relative).name in {'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'uv.lock', 'poetry.lock', 'Cargo.lock', 'go.sum'}:
@@ -49,8 +52,31 @@ def workspace_observation(path):
             'inode': physical.st_ino, 'admin_device': admin.stat().st_dev,
             'admin_inode': admin.stat().st_ino, 'head': git('rev-parse', 'HEAD'),
             'tree': git('rev-parse', 'HEAD^{tree}'),
-            'clean': not bool(git('status', '--porcelain', '--untracked-files=all')),
+            'clean': not bool(git('status', '--porcelain', '--untracked-files=all', '--ignored=matching')),
+            'index_sha256': index_digest,
             'lockfiles': lockfiles}
+
+
+def observe_tools(argv):
+    executable = Path(argv[0])
+    if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+        raise SyncwheelError('reviewed test executable must be an available absolute path')
+    git_path = shutil.which('git')
+    if git_path is None:
+        raise SyncwheelError('Git executable is unavailable for test input observation')
+    def identity(path):
+        target = Path(path).resolve(strict=True)
+        return {'path': str(target), 'sha256': hashlib.sha256(target.read_bytes()).hexdigest()}
+    import syncwheel_test_slot
+    return {'command_executable': identity(executable), 'python': identity(sys.executable),
+            'python_version': sys.version, 'python_prefix': sys.prefix,
+            'git': identity(git_path), 'git_command_path': str(Path(git_path).absolute()),
+            'scope': 'controller modules, controller tools and command entrypoint; payload descendants are caller-controlled',
+            'git_version': command([git_path, '--version']),
+            'adapter_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'domain_sha256': hashlib.sha256(Path(syncwheel_test_slot.__file__).read_bytes()).hexdigest(),
+            'controller_modules': {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                   for path in sorted(Path(__file__).parent.glob('syncwheel*.py'))}}
 
 
 class NativeJsonStore:
@@ -66,6 +92,7 @@ class NativeJsonStore:
 
 class NativeCooperativeJob:
     def __init__(self, workspace, configuration):
+        self.api = configuration
         self.workspace = Path(workspace).resolve(strict=True)
         self.initial = workspace_observation(self.workspace)
         self.admin = Path(self.initial['admin'])
@@ -93,7 +120,7 @@ class NativeCooperativeJob:
 
     def configuration(self, unit):
         values = self.manager('systemctl', '--user', 'show', unit,
-            '--property=Type,ExitType,KillMode,RemainAfterExit,WorkingDirectory,Description,Transient')
+            '--property=Type,ExitType,KillMode,RemainAfterExit,WorkingDirectory,Description,Transient,CPUAccounting,MemoryAccounting,Restart')
         config = dict(row.split('=', 1) for row in values.splitlines() if '=' in row)
         starts = self.dbus_property(unit, 'org.freedesktop.systemd1.Service', 'ExecStart')
         if len(starts) != 1:
@@ -127,15 +154,37 @@ class NativeCooperativeJob:
 
     def expected_configuration(self, operation, timeout):
         nonce = operation['nonce']
-        argv = [str(Path(sys.executable).resolve()), str(Path(__file__).resolve()), '_worker', str(self.store.path), nonce]
+        argv = [sys.executable, str(Path(__file__).resolve()), '_worker', str(self.store.path), nonce]
         return {'Type': 'exec', 'ExitType': 'cgroup', 'KillMode': 'control-group',
-                'RemainAfterExit': 'yes', 'WorkingDirectory': str(self.workspace),
+                'RemainAfterExit': 'yes', 'Restart': 'no', 'CPUAccounting': 'yes', 'MemoryAccounting': 'yes',
+                'WorkingDirectory': str(self.workspace),
                 'Description': 'Syncwheel cooperative test ' + nonce, 'Transient': 'yes',
-                'exec': [str(Path(sys.executable).resolve()), argv, False], 'runtime_us': timeout * 1000000}
+                'exec': [sys.executable, argv, False], 'runtime_us': timeout * 1000000}
 
-    def start(self, request, timeout=300):
+    def read_manifest_blob(self, object_id):
+        result = subprocess.run(['git', 'cat-file', 'blob', object_id], cwd=self.workspace,
+                                capture_output=True)
+        if result.returncode:
+            raise SyncwheelError('immutable test control manifest blob is unavailable')
+        check = subprocess.run(['git', 'hash-object', '--stdin'], cwd=self.workspace,
+                               input=result.stdout, capture_output=True, check=True)
+        if check.stdout.decode().strip() != object_id:
+            raise SyncwheelError('immutable test control manifest blob failed object verification')
+        return result.stdout
+
+    def derive_request(self, inputs):
+        workspace = workspace_observation(self.workspace)
+        def validate(manifest, channel):
+            self.api.require_channel_materialization_valid(self.workspace, manifest, channel)
+            if self.api.ref_tip(self.workspace, channel['branch']) != workspace['head']:
+                raise SyncwheelError('test workspace HEAD does not match the selected local channel ref')
+        return derive_channel_request(inputs, workspace, read_manifest_blob=self.read_manifest_blob,
+                                      validate_channel=validate, observe_tools=observe_tools)
+
+    def start(self, inputs, timeout=300):
         if not isinstance(timeout, int) or not 1 <= timeout <= 3600:
             raise SyncwheelError('cooperative test timeout must be between 1 and 3600 seconds')
+        request = self.derive_request(inputs)
         operation = self.slot.reserve(request)
         nonce = operation['nonce']
         directory, log = self.paths(nonce)
@@ -143,14 +192,17 @@ class NativeCooperativeJob:
         for name in ('home', 'tmp', 'output'):
             (directory / name).mkdir(mode=0o700)
         log.touch(mode=0o600)
+        verification = {'channel_projection_pending': True, 'request_digest': operation['request_digest']}
         config = self.expected_configuration(operation, timeout)
-        operation = self.slot.starting(nonce, 'syncwheel-test-' + nonce + '.service', config)
+        operation = self.slot.starting(nonce, 'syncwheel-test-' + nonce + '.service', config,
+                                       verification=verification)
         # Starting is durable before the native request. A failed/uncertain call
         # deliberately keeps the reservation; recovery never calls start again.
         argv = ['systemd-run', '--user', '--no-ask-password', '--expand-environment=no',
                 '--unit=' + operation['unit'], '--description=' + config['Description'],
-                '--service-type=exec', '--remain-after-exit', '--property=ExitType=cgroup',
-                '--property=KillMode=control-group', '--property=RuntimeMaxSec=' + str(timeout),
+                '--service-type=exec', '--remain-after-exit', '--property=ExitType=cgroup', '--property=Restart=no',
+                '--property=KillMode=control-group', '--property=CPUAccounting=yes',
+                '--property=MemoryAccounting=yes', '--property=RuntimeMaxSec=' + str(timeout),
                 '--property=StandardOutput=append:' + str(log),
                 '--property=StandardError=append:' + str(log), '--working-directory=' + str(self.workspace),
                 *config['exec'][1]]
@@ -200,9 +252,26 @@ class NativeCooperativeJob:
                 _, log = self.paths(nonce)
                 with log.open('rb') as handle:
                     os.fsync(handle.fileno())
+                preparation_path = self.paths(nonce)[0] / 'preparation.json'
+                try:
+                    preparation = json.loads(preparation_path.read_text())
+                except (OSError, ValueError):
+                    preparation = {'available': False}
+                valid_preparation = (
+                    preparation.get('nonce') == nonce
+                    and preparation.get('invocation') == operation['binding']['invocation']
+                    and preparation.get('request_digest') == operation['request_digest']
+                    and preparation.get('channel_projection_tree') == operation['request']['tree']
+                    and preparation.get('passed') is True
+                )
+                try:
+                    tools_unchanged = observe_tools(operation['request']['argv']) == operation['request']['tools']
+                except (OSError, SyncwheelError):
+                    tools_unchanged = False
                 return self.slot.finish(nonce, confirmed, cgroup_exists=exists,
                     cgroup_populated=populated, log_digest=hashlib.sha256(log.read_bytes()).hexdigest(),
-                    measurements={'cpu_ns': observed['cpu_ns'], 'memory_peak': observed['memory_peak']})
+                    measurements={'cpu_ns': observed['cpu_ns'], 'memory_peak': observed['memory_peak']},
+                    inputs_unchanged=valid_preparation and tools_unchanged, verification=preparation)
             if (observed.get('active'), observed.get('substate')) in {('active', 'exited'), ('failed', 'failed')}:
                 raise SyncwheelError('native test terminal evidence is incomplete; keep reservation')
             if not wait:
@@ -233,26 +302,64 @@ def worker(path, nonce):
             own_cgroup = next(row[3:] for row in cgroups if row.startswith('0::'))
             if own_cgroup != operation['binding']['cgroup']:
                 raise SyncwheelError('worker cgroup does not match the durable native binding')
+            if os.environ.get('INVOCATION_ID') != operation['binding']['invocation']:
+                raise SyncwheelError('worker invocation does not match the durable native binding')
             break
         if operation['state'] != 'starting':
             raise SyncwheelError('test worker has no valid startup handshake')
         time.sleep(0.02)
     request = operation['request']
-    if workspace_observation(request['workspace']['path']) != request['workspace']:
-        raise SyncwheelError('test workspace changed before worker execution')
     directory = path.parent / 'syncwheel-test-jobs' / nonce
-    environment = dict(request.get('environment', {}))
-    if any(key.startswith(('GIT_', 'LD_', 'PYTHON')) or key in {'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR'} for key in environment):
-        raise SyncwheelError('test environment cannot select Git, loader, Python or manager namespaces')
-    environment.update(HOME=str(directory/'home'), TMPDIR=str(directory/'tmp'),
-                       TMP=str(directory/'tmp'), TEMP=str(directory/'tmp'),
-                       SYNCWHEEL_TEST_OUTPUT=str(directory/'output'))
-    return subprocess.run(request['argv'], cwd=request['workspace']['path'], env=environment).returncode
+    import syncwheel as configuration
+    preparation = {'nonce': nonce, 'invocation': operation['binding']['invocation'],
+                   'request_digest': operation['request_digest'], 'passed': False,
+                   'method': 'existing ReplayEngine channel projection'}
+    started = time.monotonic()
+    try:
+        environment = dict(request.get('environment', {}))
+        environment.update(HOME=str(directory/'home'), TMPDIR=str(directory/'tmp'),
+                           TMP=str(directory/'tmp'), TEMP=str(directory/'tmp'),
+                           XDG_CONFIG_HOME=str(directory/'home/config'),
+                           XDG_STATE_HOME=str(directory/'home/state'),
+                           XDG_CACHE_HOME=str(directory/'home/cache'),
+                           SYNCWHEEL_UPDATE_MODE='off', PYTHONDONTWRITEBYTECODE='1', GIT_OPTIONAL_LOCKS='0',
+                           SYNCWHEEL_UPDATE_SETTINGS_PATH=str(directory/'home/settings.json'),
+                           SYNCWHEEL_REPO_REGISTRY=str(directory/'home/registry.json'),
+                           SYNCWHEEL_TEST_OUTPUT=str(directory/'output'))
+        # Preparation also runs in the job's private HOME/temp namespaces, not
+        # the manager's ambient application settings or cache directories.
+        preparation_environment = dict(environment)
+        preparation_environment['PATH'] = str(Path(request['tools']['git_command_path']).parent) + os.pathsep + os.defpath
+        os.environ.clear()
+        os.environ.update(preparation_environment)
+        if observe_tools(request['argv']) != request['tools']:
+            raise SyncwheelError('test executable or worker toolchain changed before execution')
+        if workspace_observation(request['workspace']['path']) != request['workspace']:
+            raise SyncwheelError('test workspace changed before worker execution')
+        projected = configuration.materialize_channel_tree(
+            Path(request['workspace']['path']), request['verified_provenance']['channel'])
+        preparation.update(channel_projection_tree=projected,
+                           preparation_seconds=time.monotonic()-started)
+        if projected != request['tree']:
+            raise SyncwheelError('test candidate tree differs from the selected channel projection')
+        if workspace_observation(request['workspace']['path']) != request['workspace']:
+            raise SyncwheelError('test workspace changed during input preparation')
+        preparation['passed'] = True
+        configuration.atomic_write_private_json(directory/'preparation.json', preparation, indent=2)
+        test_started = time.monotonic()
+        result = subprocess.run(request['argv'], cwd=request['workspace']['path'], env=environment)
+        preparation.update(test_seconds=time.monotonic()-test_started, command_exit=result.returncode)
+        configuration.atomic_write_private_json(directory/'preparation.json', preparation, indent=2)
+        return result.returncode
+    except Exception as error:
+        preparation.update(passed=False, detail=str(error), preparation_seconds=time.monotonic()-started)
+        configuration.atomic_write_private_json(directory/'preparation.json', preparation, indent=2)
+        raise
 
 
-def main():
+def run_cli():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['run', 'recover', 'cleanup', '_worker'])
+    parser.add_argument('action', choices=['inspect', 'run', 'recover', 'cleanup', '_worker'])
     parser.add_argument('workspace')
     parser.add_argument('input', help='reviewed request JSON for run; recorded nonce for recover/cleanup')
     parser.add_argument('--timeout', type=int, default=300)
@@ -261,7 +368,9 @@ def main():
         return worker(args.workspace, args.input)
     import syncwheel as configuration
     job = NativeCooperativeJob(args.workspace, configuration)
-    if args.action == 'run':
+    if args.action == 'inspect':
+        result = job.derive_request(json.loads(Path(args.input).read_text()))
+    elif args.action == 'run':
         request = json.loads(Path(args.input).read_text())
         operation = job.start(request, args.timeout)
         result = job.recover(operation['nonce'], wait=True)
@@ -274,9 +383,13 @@ def main():
     return 0 if result.get('qualified', True) else 2
 
 
-if __name__ == '__main__':
+def main():
     try:
-        raise SystemExit(main())
-    except SyncwheelError as error:
+        return run_cli()
+    except (SyncwheelError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
-        raise SystemExit(2)
+        return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.52.0 - 2026-11-26
+
+- Add cooperative native test-slot reservations and retained-unit recovery, deriving reproducible channel input provenance from immutable control blobs and existing replay contracts. Keep caller observations distinct, isolate job inputs and outputs, and qualify physical release separately from test success.
+
 ## 0.51.1 - 2026-11-26
 
 - Materialize pinned channels whose prerequisite commits are already ancestors of the exact base, preserving raw pins, dependencies and evidence digests. Keep unrelated equivalent patches and real conflicts fail-closed; qualify dependent, returning-author and draft-selection scenarios.

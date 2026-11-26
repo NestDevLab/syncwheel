@@ -351,6 +351,7 @@ import syncwheel_worktree_policy as _worktree_policy
 import syncwheel_execution_policy as _execution_policy
 import syncwheel_private_json as _private_json
 from syncwheel_contracts import (
+    CHANNEL_PLAN_SCHEMA_VERSION,
     AUTHORITY_GRANTABLE_CLASSES,
     COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
     COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND,
@@ -536,7 +537,6 @@ FALLBACK_GIT_IDENTITY_CONFIG = [
 ]
 WARNED_GIT_IDENTITY_PATHS = set()
 COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'commit-tree', 'merge', 'revert'}
-CHANNEL_PLAN_SCHEMA_VERSION = 1
 STACK_LAND_PLAN_SCHEMA_VERSION = 1
 GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION = 1
 GITHUB_PR_MERGE_POLICY_KEY = 'github_pr_merge'
@@ -5068,6 +5068,10 @@ def latest_channel_event(repo_root, manifest_path, channel_id, event_type):
 
 def materialize_channel_tip(repo_root, channel, plan):
     return _replay_engine(repo_root).materialize_channel_tip(channel, plan)
+
+
+def materialize_channel_tree(repo_root, channel):
+    return _replay_engine(repo_root).materialize_channel_tree(channel)
 
 
 def channel_receipt(channel, plan, status, tip=None, published_revision=None, coordination_state=None):
