@@ -7,7 +7,7 @@ argument parsers and behavior descriptions; it never imports command execution.
 import argparse
 
 from syncwheel_worktree_policy import POLICY_VALUES
-from syncwheel_policy import FIELD_VALUES
+from syncwheel_policy import FIELD_VALUES, PRESETS
 
 from syncwheel_contracts import (
     AUTHORITY_GRANTABLE_CLASSES,
@@ -62,7 +62,7 @@ def add_worktree_policy_parser(parent, commands, *, scope, common=None, name='wo
             if scope == 'lane':
                 parser.add_argument('--bind-generation', help='explicitly bind new overrides to this current generation')
             if execution:
-                parser.add_argument('--preset', choices=('disabled', 'minimal'))
+                parser.add_argument('--preset', choices=tuple(PRESETS))
             for field, values in fields.items():
                 parser.add_argument('--' + field.replace('_', '-'), choices=values)
         if action == 'clear':

@@ -131,7 +131,7 @@ class ExecutionPolicyCliTest(unittest.TestCase):
     def test_unknown_presets_and_malformed_receipts_preserve_profile_bytes(self):
         self.command('repo', 'set', '--preset', 'minimal', '--apply')
         before = self.fixture.profile.read_bytes()
-        self.command('repo', 'set', '--preset', 'strict', '--apply', expected=2)
+        self.command('repo', 'set', '--preset', 'unknown', '--apply', expected=2)
         path = self.fixture.fixture.tmp / 'bad.json'
         path.write_text(json.dumps(receipt('a' * 40, 'review', reviewer='WRITER')))
         self.command('repo', 'record', '--receipt', str(path), '--apply', expected=2)
@@ -210,7 +210,7 @@ class ExecutionMergeGatesTest(unittest.TestCase):
 
     def plan(self, preset, *, mandatory=False, tests=True, review=True, ci=None,
              decision='APPROVED', permissions=None, historical_authors=False, observed_actor='Yehonal',
-             private_legacy=False):
+             private_legacy=False, test_scope='targeted', review_scope='sensitive'):
         fixture = self.fixture
         fixture.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         fixture.manifest_path.write_text(json.dumps(fixture.manifest))
@@ -231,9 +231,9 @@ class ExecutionMergeGatesTest(unittest.TestCase):
             profile.pop('worktree_policy', None)
         receipts = []
         if tests:
-            receipts.append(receipt(fixture.head, 'tests'))
+            receipts.append(receipt(fixture.head, 'tests', scope=test_scope))
         if review:
-            receipts.append(receipt(fixture.head, 'review'))
+            receipts.append(receipt(fixture.head, 'review', scope=review_scope))
         profile = execution.record_receipts(profile, receipts)
         path.write_text(json.dumps(profile))
         observation = fixture.observation(decision=decision, checks=ci or [])

@@ -45,8 +45,8 @@ PRESETS = {
         'installation_smoke': 'required',
     },
     'standard': {
-        'expiry': 'enforced',
-        'writer_exclusivity': 'block',
+        'expiry': 'off',
+        'writer_exclusivity': 'warn',
         'checks': 'all',
         'integration_validation': 'advisory',
         'tests': 'targeted',
@@ -54,8 +54,8 @@ PRESETS = {
         'installation_smoke': 'required',
     },
     'strict': {
-        'expiry': 'enforced',
-        'writer_exclusivity': 'block',
+        'expiry': 'off',
+        'writer_exclusivity': 'warn',
         'checks': 'all',
         'integration_validation': 'required',
         'tests': 'extended',

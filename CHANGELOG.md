@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.51.0 - 2026-11-26
+
+- Activate Standard and Strict execution preferences through the existing scope resolver and gates, with custom per-field overrides and provenance. Keep logical expiry off and writer admission advisory in every preset, while preserving real locks, dirty work and CAS. Scope optional all-check validation to the exact candidate and require exact-revision provenance for mandatory forge checks under operational preferences. Preserve disabled/minimal and legacy behavior without opt-in; installed smoke remains release evidence.
+
 ## 0.50.1 - 2026-11-26
 
 - Scope version 2 compose validation to the selected source and real dependency closure. Preserve foreign snapshots and historical tips when unrelated remote refs are missing or divergent, report their observations separately, and retain atomic source/claim/state publication and crash recovery. Treat unrelated local product projections as unqualified instead of requiring a global replay, while keeping exact local control HEAD/manifest CAS and preserving unpublished product bytes and ancestry.
