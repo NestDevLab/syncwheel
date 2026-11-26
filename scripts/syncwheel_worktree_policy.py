@@ -91,7 +91,7 @@ def effective_for_context(global_document, profile, *, lane=None, lane_generatio
         if len(matches) > 1:
             raise SyncwheelError('current checkout has ambiguous governed lane registration')
         lane = matches[0] if matches else None
-    if lane is None:
+    if lane is None or lane.get('id') not in entries:
         return resolve_policy(global_document, profile)
     binding = {'id': lane['id'], 'generation_token': lane_generation(lane)}
     selected, report = lane_document(profile, binding)

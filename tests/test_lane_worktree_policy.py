@@ -34,6 +34,22 @@ class LaneWorktreePolicyTest(TestCase):
         registry, path = self.module.load_governed_worktree_registry(self.fixture.repo)
         return registry, path, next(item for item in registry['lanes'] if item['id'] == lane['id'])
 
+    def test_unconfigured_lane_adds_no_generation_requirement_to_legacy_admission(self):
+        policy = self.module._worktree_policy
+        token = mock.Mock(side_effect=AssertionError('unused generation lookup'))
+        load_lanes = mock.Mock(side_effect=AssertionError('unused registry lookup'))
+        for profile in ({}, {'lane_worktree_policies': {'unrelated': {
+                'generation_token': 'other', 'worktree_policy': {'expiry': 'off'},
+        }}}):
+            with self.subTest(profile=profile):
+                result = policy.effective_for_context(
+                    {}, profile, lane={'id': 'related', 'state': 'active'},
+                    lane_generation=token, load_lanes=load_lanes,
+                )
+                self.assertEqual(result['effective'], {'expiry': 'enforced', 'writer_exclusivity': 'legacy'})
+        token.assert_not_called()
+        load_lanes.assert_not_called()
+
     def test_preview_apply_inheritance_clear_and_foreign_state_are_scoped(self):
         lane = self.lane()
         self.base.set_policy('self', '--expiry', 'off', '--writer-exclusivity', 'warn')
