@@ -58,7 +58,9 @@ and [systemd-run contract](https://www.freedesktop.org/software/systemd/man/255/
    authoritative terminal observations. A running descendant retains the slot.
    Successful retained units can be `active/exited`; failed units can be
    `failed/failed`. Neither `ActiveState=active` alone nor `MainPID=0` proves that
-   processes remain or have ceased. Require a verified empty unit cgroup as
+   processes remain or have ceased. A retained signal termination can be a
+   clean service result; record it as a negative test outcome, never success.
+   Require a verified empty unit cgroup as
    well as the matching terminal service result and main exit. If the manager
    has retired the cgroup, qualify that observation explicitly; never interpret
    an empty cgroup path as the cgroup filesystem root or unknown as empty.

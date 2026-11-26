@@ -169,6 +169,21 @@ class CooperativeTestSlotTest(unittest.TestCase):
         self.assertFalse(receipt['result']['passed'])
         self.assertIsNone(self.store.load()['active'])
 
+    def test_retained_clean_signal_releases_only_as_a_negative_result(self):
+        nonce, _, terminal = self.running()
+        terminal.update(main_code=2, main_status=15, cgroup='')
+        before = self.path.read_bytes()
+        for populated in (True, False):
+            with self.assertRaises(SyncwheelError):
+                self.finish(nonce, terminal, exists=False, populated=populated)
+            self.assertEqual(self.path.read_bytes(), before)
+        receipt = self.finish(nonce, terminal, exists=False, populated=None)
+        self.assertFalse(receipt['qualified'])
+        self.assertFalse(receipt['result']['passed'])
+        self.assertEqual(receipt['result']['outcome'], 'signal')
+        self.assertEqual(receipt['terminal']['result'], 'success')
+        self.assertIsNone(self.store.load()['active'])
+
     def test_recovery_is_idempotent_and_cannot_release_a_newer_reservation(self):
         nonce, _, terminal = self.running()
         receipt = self.finish(nonce, terminal)

@@ -108,8 +108,15 @@ def terminal_observation(binding, observation, *, cgroup_exists, cgroup_populate
     outcome = observation.get('result')
     state = (observation.get('active'), observation.get('substate'))
     if outcome == 'success':
-        if state != ('active', 'exited') or observation.get('main_code') != 1 or observation.get('main_status') != 0:
+        code, status = observation.get('main_code'), observation.get('main_status')
+        normal_exit = code == 1 and status == 0
+        signaled = code in (2, 3) and type(status) is int and 0 < status <= 64
+        if state != ('active', 'exited') or not (normal_exit or signaled):
             return None
+        # systemd treats some termination signals as clean service outcomes.
+        # They prove cessation once the cgroup is empty, never a passing test.
+        if signaled:
+            outcome = 'signal'
     elif state != ('failed', 'failed') or not outcome or observation.get('main_code') is None or observation.get('main_status') is None:
         return None
     current_cgroup = observation.get('cgroup')
