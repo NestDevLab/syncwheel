@@ -373,4 +373,3 @@ def execute_test_slot(args, configuration):
         job.cleanup(args.input)
         result = {'nonce': args.input, 'cleanup': 'succeeded'}
     return result
-

@@ -266,5 +266,36 @@ class NativeRecoveryUncertaintyTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
 
 
+class StandaloneSlotTransportTest(unittest.TestCase):
+    def test_help_does_not_run_ordinary_delivery_startup(self):
+        import contextlib
+        import io
+        from unittest import mock
+        module = facade()
+        with mock.patch.object(module, 'main', side_effect=AssertionError('ordinary startup forbidden')) as normal:
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    module.main_test_slot(['--help'])
+            self.assertEqual(stopped.exception.code, 0)
+            normal.assert_not_called()
+
+    def test_status_exposes_the_recorded_nonce_without_dispatch(self):
+        import contextlib
+        import io
+        import json
+        from unittest import mock
+        import syncwheel_test_slot_native as native
+        module = facade()
+        job = mock.Mock()
+        job.store.load.return_value = {'active': {'nonce': 'recorded', 'state': 'starting'}, 'receipts': {}}
+        output = io.StringIO()
+        with mock.patch.object(native, 'NativeCooperativeJob', return_value=job):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(module.main_test_slot(['status', '/synthetic/workspace']), 0)
+        self.assertEqual(json.loads(output.getvalue())['active']['nonce'], 'recorded')
+        job.start.assert_not_called()
+        job.store.load.assert_called_once_with()
+
+
 if __name__ == '__main__':
     unittest.main()
