@@ -5948,6 +5948,7 @@ def github_pr_merge_plan_digest(plan):
     unsigned.pop('planDigest', None)
     unsigned.pop('operationId', None)
     unsigned.pop('supersededChecks', None)
+    unsigned.pop('outOfScopeChecks', None)
     return canonical_json_digest(unsigned)
 
 
@@ -6107,7 +6108,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         github_blocker(blockers, 'merge_actor_permission_missing' if operational_preferences else 'merge_actor_not_admin',
                        'effective gh actor has no verified repository write permission' if operational_preferences else
                        'effective gh actor has no repository admin permission')
-    checks, superseded_checks = [], []
+    checks, superseded_checks, out_of_scope_checks = [], [], []
     if isinstance(pr, dict):
         if pr_number is not None and pr.get('number') != int(pr_number):
             github_blocker(blockers, 'pull_request_number_mismatch', 'observed PR number differs from the stack declaration')
@@ -6157,7 +6158,10 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         if pr.get('mergeStateStatus') in {'BEHIND', 'DIRTY', 'UNKNOWN', 'UNSTABLE'}:
             github_blocker(blockers, 'base_obsolete_or_dirty', f"mergeStateStatus={pr.get('mergeStateStatus')}")
         head = pr.get('headRefOid')
-        checks, superseded_checks = github_effective_checks(pr.get('checks') or [], head)
+        observed_checks = pr.get('checks') or []
+        if operational_preferences:
+            observed_checks, out_of_scope_checks = _execution_policy.candidate_checks(observed_checks, head)
+        checks, superseded_checks = github_effective_checks(observed_checks, head)
         changed_paths = git(repo_root, 'diff', '--name-only', stack.get('base'), source_revision, '--').stdout.splitlines() if source_revision else []
         sensitive = _execution_policy.sensitive_paths(changed_paths)
         evidence_blockers, candidate_evidence = _execution_policy.candidate_gates(
@@ -6187,7 +6191,8 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
                 github_blocker(blockers, 'checks_missing', 'at least one successful check is required')
             else:
                 for check in checks:
-                    if github_ci_check_result(check, head) is None:
+                    if (github_ci_check_result(check, head) is None
+                            or (operational_preferences and not _execution_policy.check_matches_candidate(check, head))):
                         github_blocker(blockers, 'check_failed_or_pending', f'check did not conclude SUCCESS/SKIPPED: {check}')
         else:
             warnings.append({
@@ -6210,7 +6215,8 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             if not named:
                 github_blocker(blockers, 'required_check_missing', f'required check is absent: {name}')
             for required_check in named:
-                if github_ci_check_result(required_check, head) is None:
+                if (github_ci_check_result(required_check, head) is None
+                        or (operational_preferences and not _execution_policy.check_matches_candidate(required_check, head))):
                     github_blocker(
                         blockers,
                         'required_check_failed_or_pending',
@@ -6293,6 +6299,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'mergeActor': actor,
         'checks': checks,
         'supersededChecks': superseded_checks,
+        'outOfScopeChecks': out_of_scope_checks,
         'review': pr.get('review') or {},
         'threads': (pr.get('review') or {}).get('threads') or [],
         'rules': rules,

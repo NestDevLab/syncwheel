@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.51.0 - 2026-11-26
+
+- Activate Standard and Strict execution preferences through the existing scope resolver and gates, with custom per-field overrides and provenance. Keep logical expiry off and writer admission advisory in every preset, while preserving real locks, dirty work and CAS. Scope optional all-check validation to the exact candidate and require exact-revision provenance for mandatory forge checks under operational preferences. Preserve disabled/minimal and legacy behavior without opt-in; installed smoke remains release evidence.
+
 ## 0.50.2 - 2026-11-26
 
 - Qualify independent conflicting compositions, preserve the last valid channel tip after failed unions, and document the composition acceptance coverage map.
