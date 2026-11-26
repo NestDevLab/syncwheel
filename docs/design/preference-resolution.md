@@ -4,10 +4,13 @@ The pure `syncwheel_policy` module defines one resolution table. The existing
 worktree preference API delegates its two supported fields to that resolver and
 keeps its existing JSON shape, CLI choices and implicit defaults.
 
-This increment is an internal contract. Public worktree commands continue to
+The general preset table remains an internal contract. Public worktree commands
 accept only `expiry` and `writer_exclusivity`; they reject a `preset` key rather
-than applying a profile partially. There is no new setter, lane configuration
-store, operational gate relaxation or automatic configuration migration here.
+than applying a profile partially. The worktree consumer supports user,
+repository and generation-bound lane overrides for those two fields, described
+in [worktree preferences](../worktree-policy.md). This pure module does not
+persist settings, discover a lane, relax operational delivery gates or migrate
+configuration.
 
 ## Explicit presets
 

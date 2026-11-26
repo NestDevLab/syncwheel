@@ -1,7 +1,8 @@
 # Worktree preferences
 
-Worktree preferences have two independent fields. A private repository override
-takes precedence over the user setting **per field**, then built-in defaults.
+Worktree preferences have two independent fields. A generation-bound lane override
+takes precedence over a private repository override, then the user setting and
+built-in defaults, **per field**.
 
 | Field | Explicit values | Built-in behavior when unset |
 | --- | --- | --- |
@@ -50,6 +51,55 @@ inheritance; clearing a user field restores its built-in default. Other JSON
 keys are preserved. Repository writes require an ignored, untracked profile.
 Status reports effective values, their sources, and both configured layers.
 These commands do not update lane records, refs, manifests, or coordination state.
+
+## Lane overrides
+
+Select a governed lane by its stable registry ID, not its owner or process ID:
+
+```bash
+syncwheel worktree policy feature-a status --json
+syncwheel worktree policy feature-a set --expiry off
+syncwheel worktree policy feature-a set --expiry off --apply
+syncwheel worktree policy feature-a clear expiry --apply
+syncwheel worktree policy feature-a clear --apply
+```
+
+The lane command resolves user, repository and lane values together. Repository
+status continues to describe the user/repository levels. Preview remains the
+default; only `--apply` writes. Lane settings live under
+`lane_worktree_policies` in the same ignored private repository profile. Each
+entry binds the lane ID and its existing generation token to a `worktree_policy`
+object. Historical records use the existing ID/creation-time/branch generation
+fallback. Changing an owner or process does not change that binding. No lane
+record, Git ref, index or foreign worktree lock is rewritten by a settings edit.
+
+Status reports the generation and whether its binding is `inherited`, `bound`,
+`stale`, `invalid` or `missing`. An obsolete binding is retained but its overrides
+are ignored; current user/repository preferences apply. Observation reports this
+condition without making it a project-wide admission failure. A missing lane's
+stored preferences can still be inspected and cleared. An invalid binding requires
+clear-all to avoid silently discarding unrecognized fields. Setting a stale binding
+requires explicit selection of the current generation reported by status:
+
+```bash
+syncwheel worktree policy feature-a set --expiry off \
+  --bind-generation CURRENT_GENERATION --apply
+```
+
+Rebinding starts with empty lane overrides, so omitted old-generation fields
+cannot follow a recreated lane. A supplied generation also pins an ordinary
+update. The setter checks the selected generation again under the existing
+registry lock before saving through the profile's JSON CAS. The lock order is
+registry, then private profile; the registry itself is not saved. Concurrent
+replacement of the lane or profile refuses the update without overwriting it.
+
+Diagnostics, expiry-based cleanup eligibility and automatic capture holds use
+the policy of the lane being examined. Pre-commit admission uses the registered
+checkout. Opening into a stack and scoped lifecycle preflight resolve each
+associated lane independently: a caller's relaxed override cannot relax another
+lane's logical writer rule. Dirty state, physical locks, pending cleanup,
+malformed leases, real ownership and publication/CAS protections retain their
+existing checks.
 
 Configuration writes share a cooperative document lock and compare the exact
 bytes observed by the reader before replacement. This also covers existing
