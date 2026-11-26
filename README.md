@@ -5,6 +5,10 @@ manifest.
 
 Current version: `0.50.1`
 
+Operational private `disabled` and `minimal` preferences are available through
+[`execution-policy`](docs/execution-policy.md), with candidate evidence separate
+from installed-release smoke.
+
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
 under control over time.

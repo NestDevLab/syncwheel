@@ -17,6 +17,11 @@ a different writer; `warn` reports the different writer and continues; `off`
 does not perform that logical ownership check. These values are opt-ins so an
 upgrade with no configuration retains the previous behavior.
 
+For complete `disabled`/`minimal` preset selection, use
+[execution policy](execution-policy.md). The commands below remain the two-field
+projection; they preserve unrelated execution fields and preset selection.
+Clearing these two fields does not remove a separately selected preset.
+
 ## Read, preview and apply
 
 The user commands work outside a Git repository:

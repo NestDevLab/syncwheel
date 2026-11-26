@@ -4,6 +4,10 @@
 
 - Scope version 2 compose validation to the selected source and real dependency closure. Preserve foreign snapshots and historical tips when unrelated remote refs are missing or divergent, report their observations separately, and retain atomic source/claim/state publication and crash recovery. Treat unrelated local product projections as unqualified instead of requiring a global replay, while keeping exact local control HEAD/manifest CAS and preserving unpublished product bytes and ancestry.
 
+## 0.50.0 - 2026-11-26
+
+- Activate private disabled/minimal execution preferences at global, repository and generation-bound lane scopes, with per-field provenance and clear semantics. Connect optional merge gates to exact-candidate test and independent-review evidence; override private legacy validation preferences while keeping published authority, real dependencies and forge requirements enforced. Track installed-package smoke separately as release completion, preserving CAS and receipt collision protection.
+
 ## 0.49.1 - 2026-11-26
 
 - Publish a selected coordinated stack without dereferencing unchanged foreign recipe history. Preserve exact remote state/ref checks, structural validation and target validation; report incomplete integration classification explicitly. Keep dependency closure outside the deferral scope.
