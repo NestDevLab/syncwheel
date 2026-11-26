@@ -110,6 +110,14 @@ class PolicyResolutionTest(unittest.TestCase):
             with self.subTest(floor=floor), self.assertRaises(SyncwheelError):
                 resolve_preferences({}, floor=floor)
 
+    def test_malformed_level_documents_are_not_treated_as_empty_inheritance(self):
+        for malformed in (False, [], '', 0):
+            for level in ('global', 'repo', 'lane'):
+                with self.subTest(level=level, document=malformed), self.assertRaises(SyncwheelError):
+                    inputs = {'global_document': {}, 'repo_document': {}, 'lane_document': {}}
+                    inputs[level + '_document'] = malformed
+                    resolve_preferences(**inputs)
+
     def test_existing_worktree_api_keeps_its_schema_and_refuses_unwired_presets(self):
         result = resolve_policy(document(expiry='off'), document(writer_exclusivity='block'))
         self.assertEqual(result, {

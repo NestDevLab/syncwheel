@@ -68,6 +68,8 @@ PRESETS = {
 def configuration_values(document, label, *, fields=None, allow_presets=True):
     """Expand one level, with explicit fields taking precedence over its preset."""
     selected = tuple(FIELD_VALUES if fields is None else fields)
+    if not isinstance(document, dict):
+        raise SyncwheelError(f'{label} policy document must be an object')
     value = document.get(POLICY_KEY, {})
     if not isinstance(value, dict):
         raise SyncwheelError(f'{label}.{POLICY_KEY} must be an object')
@@ -99,8 +101,9 @@ def resolve_preferences(global_document, repo_document=None, lane_document=None,
     sources = dict.fromkeys(selected, 'default')
     details = {field: {'scope': 'default', 'kind': 'default'} for field in selected}
     layers = {}
-    for scope, document in (('global', global_document), ('repo', repo_document or {}),
-                            ('lane', lane_document or {})):
+    for scope, document in (('global', global_document),
+                            ('repo', {} if repo_document is None else repo_document),
+                            ('lane', {} if lane_document is None else lane_document)):
         values = configuration_values(document, scope, fields=selected,
                                       allow_presets=allow_presets)
         layers[scope] = values
