@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.50.2 - 2026-11-26
+
+- Qualify independent conflicting compositions, preserve the last valid channel tip after failed unions, and document the composition acceptance coverage map.
+
 ## 0.50.1 - 2026-11-26
 
 - Scope version 2 compose validation to the selected source and real dependency closure. Preserve foreign snapshots and historical tips when unrelated remote refs are missing or divergent, report their observations separately, and retain atomic source/claim/state publication and crash recovery. Treat unrelated local product projections as unqualified instead of requiring a global replay, while keeping exact local control HEAD/manifest CAS and preserving unpublished product bytes and ancestry.
