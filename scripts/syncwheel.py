@@ -50,6 +50,7 @@ from syncwheel_projection import (
 )
 
 import syncwheel_manifest_store as _manifest_storage
+import syncwheel_update_policy as _update_policy
 from syncwheel_desks import DeskLifecycle
 from syncwheel_stack_recovery import COMMIT_ID as RECOVERY_COMMIT_ID
 from syncwheel_stack_recovery import MANIFEST as STACK_RECOVERY_MANIFEST
@@ -2814,8 +2815,8 @@ def collect_self_update_status(root=None, fetch=False):
     return status
 
 
-def refresh_cached_self_update_status(force=False):
-    settings = load_update_settings()
+def refresh_cached_self_update_status(force=False, settings=None):
+    settings = load_update_settings() if settings is None else settings
     state, state_path = load_update_state()
     now = int(time.time())
     last_checked_epoch = parse_int(state.get('last_checked_epoch'), 0)
@@ -2875,36 +2876,12 @@ def perform_self_update(root=None, dry_run=False, fetch=True):
 
 
 def maybe_handle_startup_update_policy(args):
-    if getattr(args, 'command', None) == 'self':
-        return
-    try:
-        status, settings, _, _ = refresh_cached_self_update_status(force=False)
-    except SyncwheelError:
-        return
-    if settings['mode'] == 'off' or not status.get('update_available'):
-        return
-    current_version = status.get('current_version') or VERSION
-    latest_version = status.get('latest_version') or current_version
-    if settings['mode'] == 'auto':
-        try:
-            before, after, _ = perform_self_update(fetch=True)
-            print(
-                f'syncwheel auto-updated {before["current_version"]} -> {after["current_version"]}',
-                file=sys.stderr,
-            )
-            return
-        except SyncwheelError as exc:
-            print(
-                'NOTICE: syncwheel update available '
-                f'({current_version} -> {latest_version}) but auto-update was blocked: {exc}. '
-                f'Run: {status.get("recommended_command") or recommended_self_update_command()}',
-                file=sys.stderr,
-            )
-            return
-    print(
-        f'NOTICE: syncwheel update available ({current_version} -> {latest_version}). '
-        f'Run: {status.get("recommended_command") or recommended_self_update_command()}',
-        file=sys.stderr,
+    return _update_policy.handle_startup_update_policy(
+        args, load_settings=load_update_settings,
+        refresh_status=refresh_cached_self_update_status,
+        perform_update=perform_self_update,
+        emit=lambda message: print(message, file=sys.stderr),
+        current_version=VERSION, recommended_command=recommended_self_update_command,
     )
 
 

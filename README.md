@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.52.0`
+Current version: `0.52.1`
 
 Operational private `disabled`, `minimal`, `standard`, `strict` and per-field
 custom preferences are available through
@@ -961,6 +961,11 @@ python3 scripts/syncwheel.py self mode notify
 python3 scripts/syncwheel.py self mode auto
 python3 scripts/syncwheel.py self mode off
 ```
+
+`off` skips automatic startup update checks, fetches and update-cache writes.
+Explicit `self check-update` and `self update` remain available. Each automatic
+startup uses one settings snapshot; a concurrent mode change applies to the next
+command. This does not make other command-specific network operations offline.
 
 `auto` tries a safe fast-forward self-update when a newer upstream version is
 detected for git-checkout installs and runs the uv tool updater for uv installs.
