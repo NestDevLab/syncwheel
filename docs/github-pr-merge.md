@@ -9,6 +9,42 @@ authority and recheck it before merging. The policy itself
 is stored in `.syncwheel/profile.local.json`, which must remain ignored and
 untracked.
 
+## Review evidence and formal-review gates
+
+Use the [agent review procedure](ai-agents.md#independent-review-and-merge) to
+record an independent technical verdict at the exact head. A truthful same-account
+GitHub `COMMENT` records that result; it does not satisfy a distinct-identity
+approval rule. Never invent an identity or change governance implicitly.
+
+A private `allowed_bypasses: [required_reviews]` policy is usable only after explicit
+authorization for the repository, permitted bases, merge actor and source provenance.
+Inspect authority and `repo pr-merge-policy status --json` before selecting it;
+configuration is not itself authorization. The operator must verify independent technical READY and green CI externally
+at the exact SHA; a legacy policy may allow `checks: "none"`, so planner readiness
+alone does not prove those conditions. The plan must have no other blockers and
+select only the proven formal-review path. The planner does not ingest or
+authenticate a subagent's verdict. Changes requested, unresolved threads, conflicts, stale bases,
+merge queues and unknown observations still block. Explicit human-gated governance
+remains binding. Operational execution preferences currently clear these legacy
+bypasses: `disabled` or `minimal` does not enable this exception.
+
+The fixed adapter emits the equivalent of this command only for the reviewed,
+preauthorized admin-review path (shown with a squash policy):
+
+```sh
+gh pr merge "$PR" --repo "$REPO" --squash --admin --match-head-commit "$REVIEWED_SHA"
+```
+
+`--admin` is a broad GitHub permission, not a review-only capability; it can bypass
+other branch requirements server-side. It is non-default, grants no permissions
+and is safe here only within the proven, authorized planner scope. For managed
+work, use the digest-bound `stack merge-pr` plan/apply below rather than copying
+this command after a refusal. The adapter never adds `--delete-branch`.
+For already authorized native maintenance, the same explicit scope and evidence
+are required before choosing this command; the maintenance exception alone does
+not authorize it. Preserve audit, exact-head merge readback and ordinary
+reconciliation without a second merge after an uncertain response.
+
 ## Configure the private policy
 
 The command is dry-run by default and preserves unrelated profile keys:

@@ -10,7 +10,9 @@ Before writing, identify the exact repository, base, current owner and unpublish
 work. Keep one writer per diff and preserve existing lanes and shared checkouts.
 Deliver small commits with focused tests and independent review for configuration
 or integrity changes. Verify the exact candidate and required forge checks, then
-merge with the expected head pinned and without an administrator bypass.
+merge with the expected head pinned. Use ordinary merge by default. A separately
+authorized formal-review exception must satisfy the [GitHub merge contract](https://github.com/NestDevLab/syncwheel/blob/main/docs/github-pr-merge.md#review-evidence-and-formal-review-gates);
+the maintenance mandate alone grants no administrator bypass.
 
 Install the exact merged revision using the existing package manager or artifact
 installer. For agent resources, use Agentwheel from the workspace that already
