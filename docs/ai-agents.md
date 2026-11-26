@@ -17,6 +17,42 @@ The AI agent owns:
 - deciding which exact stack revisions belong in a deployment channel and
   obtaining separate evidence for any external deployment
 
+## Independent review and merge
+
+For a selected managed delivery, inspect authority and private merge policy once
+at intake, and again only after an upgrade, error or relevant state change:
+
+```sh
+syncwheel repo authority status --json
+syncwheel repo pr-merge-policy status --json
+```
+
+`ai-managed` with `source_change` permits only its declared source scope.
+`runtime_change`, a human-gated operation or an explicit repository requirement
+retains its own authorization boundary. A merge preference never widens authority.
+Explicitly authorized native maintenance follows [its separate procedure](native-maintenance.md)
+without invoking the installed CLI or revision provider for this preflight.
+
+Assign an independent reviewer subagent through the environment's authored role
+routing. Record its identity, reviewed full SHA, verdict, findings and validation;
+the writer cannot approve its own work. Resolve findings, request review of the
+new delta and pin the resulting verdict to the final SHA. If the reviewer becomes
+unavailable, explicitly reassign that bounded review and preserve the prior record.
+Do not treat an old verdict as approval of a new head.
+
+When the writer and reviewer share one GitHub account, record the independent
+technical result truthfully with a `COMMENT`, identifying the reviewer and SHA.
+It is not a distinct-account approval. Do not summon a human merely to obtain an
+approval badge, fabricate another identity or self-approve. Explicit governance
+requiring a human or distinct identity still applies until its authorized owner
+changes that requirement. See [formal-review gates](github-pr-merge.md#review-evidence-and-formal-review-gates)
+for the separately authorized, fixed-adapter exception.
+
+Before merging, observe exact-head CI, outstanding conversations and live forge
+rules. Retain plan/operation IDs and digests, merge/readback evidence and a
+reconciliation receipt for uncertain outcomes. Source, merge, installation and
+installed smoke remain separate claims.
+
 ## Ratified working rules (read this first)
 
 Follow these four operating rules before changing a managed repository.
