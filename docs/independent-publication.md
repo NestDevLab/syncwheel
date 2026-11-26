@@ -116,3 +116,24 @@ concurrent test processes. Those require separate composition and test-slot
 contracts. No new scheduler, ownership database, package-manager migration, or
 general weakening of safety guards is required to qualify this publication
 path.
+
+## Coordinated selective history validation
+
+Version 0.49.1 also permits `coordination compose --stack <id>` in a version 2
+manifest when an unchanged foreign stack has recipe objects unavailable locally.
+The existing digest-bound preview/apply protocol still verifies the accepted
+remote snapshot and every managed remote ref. Structural manifest validation and
+selected history validation remain mandatory. Only exactly unchanged foreign
+recipes outside the selected dependency closure may defer history reads. No
+author/session contact, transcript or elapsed-time evidence selects this scope.
+
+The preview names `deferredForeignHistory` and sets
+`unmappedIntegrationClassificationComplete` to false when any history is deferred;
+the apply receipt carries the corresponding snake-case fields. This does not
+prove a complete integration classification or qualify a combined test projection.
+It preserves the remote integration ref rather than rebuilding it.
+
+This increment does not yet permit missing or drifted managed remote refs, and
+does not change version 3 composition or merge-policy integration requirements.
+Use the existing exact plan file with `coordination compose --apply --plan-file`.
+No global integration rebuild is required by this selective compose operation.
