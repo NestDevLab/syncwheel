@@ -5361,7 +5361,8 @@ def execution_policy_report(repo_root):
 def command_worktree_policy(args):
     options = {}
     if args.policy_scope in {'repo', 'lane'}:
-        root = worktree_policy_root(resolve_repo_root(args.repo))
+        selected_checkout = resolve_repo_root(args.repo)
+        root = worktree_policy_root(selected_checkout)
         path = checked_repo_profile_path(root)
         if args.policy_action not in {'status', 'release-status'} and (git_path_is_tracked(root, path) or git(
             root, 'check-ignore', '--quiet', '--no-index', '--',
@@ -5369,7 +5370,8 @@ def command_worktree_policy(args):
         ).returncode != 0):
             raise SyncwheelError('worktree policy profile must be ignored and untracked')
         options = dict(profile_path=path, load_profile=lambda: load_repo_profile(root),
-                       write_profile=lambda value: save_repo_profile(root, value))
+                       write_profile=lambda value: save_repo_profile(root, value),
+                       context_report=lambda: execution_policy_report(selected_checkout))
         if args.policy_scope == 'lane':
             options.update(
                 registry_lock=lambda: governed_worktree_registry_lock(root),
@@ -6127,7 +6129,9 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     if isinstance(observation, dict) and observation.get('repository', '').casefold() != policy['repository'].casefold():
         github_blocker(blockers, 'repository_mismatch', 'observed repository differs from local policy')
     actor = identity.get('login') if isinstance(identity, dict) else None
-    if not isinstance(actor, str) or actor.casefold() not in {item.casefold() for item in policy['merge_actors']}:
+    if not isinstance(actor, str) or not actor.strip():
+        github_blocker(blockers, 'merge_actor_unknown', 'effective gh actor was not observed', actor=actor)
+    elif not operational_preferences and actor.casefold() not in {item.casefold() for item in policy['merge_actors']}:
         github_blocker(blockers, 'merge_actor_not_allowed', 'effective gh actor is not allowlisted', actor=actor)
     permissions = repository_info.get('permissions') if isinstance(repository_info, dict) else {}
     permitted = isinstance(permissions, dict) and (

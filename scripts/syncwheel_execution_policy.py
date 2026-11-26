@@ -214,4 +214,5 @@ def optional_merge_policy(policy, *, operational):
         result['allowed_bypasses'] = []
         result.pop('pr_authors', None)
         result.pop('commit_authors', None)
+        result.pop('merge_actors', None)
     return result

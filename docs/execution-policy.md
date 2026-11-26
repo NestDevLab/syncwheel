@@ -5,6 +5,12 @@ repository authority, forge requirements, ref ownership, Git locks, registry CAS
 publication leases, data preservation or destructive-operation proofs. They do
 not authorize bypassing a required forge check or review.
 
+Operational preferences discard clone-local historical author/merge-actor filters
+and review-bypass permissions. The observed current principal still needs live
+repository write permission and must satisfy published authority and forge rules.
+An unavailable predecessor does not block an authorized writer. Legacy behavior
+remains unchanged when no operational preference is selected.
+
 | Gate | disabled | minimal |
 | --- | --- | --- |
 | Logical lane expiry | Off | Off |
@@ -107,7 +113,8 @@ the release's verified source SHA and artifact SHA-256. Then run:
 syncwheel repo execution-policy release-status --head FULL_SHA --json
 ```
 
-For `minimal`, missing installed-package smoke reports `pending` and exits 1;
+Release status resolves the current checkout's generation-bound lane preferences
+as well as global/repository values. For `minimal`, missing installed-package smoke reports `pending` and exits 1;
 verified smoke reports `complete`. It does not block candidate merge or authorize
 an installation. A different candidate SHA requires its own evidence. Recording
 a receipt itself never runs or installs anything.

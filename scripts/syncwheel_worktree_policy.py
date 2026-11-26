@@ -175,7 +175,7 @@ def edit_policy(document, *, values=None, clear=(), execution=False):
 
 def run_policy_command(args, *, settings_path, load_json, write_json,
                        profile_path=None, load_profile=None, write_profile=None,
-                       registry_lock=None, load_lanes=None, lane_generation=None):
+                       registry_lock=None, load_lanes=None, lane_generation=None, context_report=None):
     """Edit only the selected private configuration, preserving other keys."""
     global_document = load_json(settings_path, {})
     repo_document = load_profile() if profile_path is not None else None
@@ -196,7 +196,8 @@ def run_policy_command(args, *, settings_path, load_json, write_json,
     if execution and operation in {'record', 'release-status'}:
         from syncwheel_execution_policy import run_evidence_command
         return run_evidence_command(args, profile=repo_document, write_profile=write_profile,
-                                    report=resolve_preferences(global_document, repo_document))
+                                    report=(context_report() if context_report is not None and operation == 'release-status' else
+                                            resolve_preferences(global_document, repo_document)))
     path = settings_path if is_global else profile_path
     current = global_document if is_global else repo_document
     if (is_lane and lane_binding['generation_token'] is None

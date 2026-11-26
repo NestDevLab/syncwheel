@@ -89,6 +89,15 @@ class ExecutionPolicyCliTest(unittest.TestCase):
         self.assertEqual(result['evidence']['package_sha256'], 'c' * 64)
         self.command('repo', 'release-status', '--head', 'd' * 40, expected=1)
 
+    def test_release_status_honors_the_current_lane_generation_preferences(self):
+        lane = self.fixture.open_lane()
+        head = self.fixture.fixture.git('rev-parse', 'HEAD')
+        self.command('repo', 'set', '--preset', 'disabled', '--apply')
+        self.cli('worktree', 'execution-policy', lane['id'], 'set', '--preset', 'minimal', '--apply', '--json')
+        self.assertEqual(json.loads(self.command('repo', 'release-status', '--head', head).stdout)['status'], 'complete')
+        result = self.command('repo', 'release-status', '--head', head, cwd=lane['path'], expected=1)
+        self.assertEqual(json.loads(result.stdout)['status'], 'pending')
+
     def test_evidence_update_preserves_a_concurrent_configuration_writer(self):
         self.command('repo', 'set', '--preset', 'minimal', '--apply')
         module = self.fixture.module
@@ -174,7 +183,7 @@ class ExecutionMergeGatesTest(unittest.TestCase):
         self.addCleanup(self.env.stop)
 
     def plan(self, preset, *, mandatory=False, tests=True, review=True, ci=None,
-             decision='APPROVED', permissions=None, historical_authors=False):
+             decision='APPROVED', permissions=None, historical_authors=False, observed_actor='Yehonal'):
         fixture = self.fixture
         fixture.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         fixture.manifest_path.write_text(json.dumps(fixture.manifest))
@@ -183,6 +192,7 @@ class ExecutionMergeGatesTest(unittest.TestCase):
         if historical_authors:
             policy['pr_authors'] = ['previous-writer']
             policy['commit_authors'] = ['previous-writer']
+            policy['merge_actors'] = ['previous-writer']
         path = fixture.repo / '.syncwheel/profile.local.json'
         profile = json.loads(path.read_text())
         profile['github_pr_merge'] = policy
@@ -197,6 +207,7 @@ class ExecutionMergeGatesTest(unittest.TestCase):
         observation = fixture.observation(decision=decision, checks=ci or [])
         if permissions is not None:
             observation['repositoryInfo']['permissions'] = permissions
+        observation['identity']['login'] = observed_actor
         observation['pr']['mergeStateStatus'] = 'CLEAN'
         if mandatory:
             observation['rules']['branchProtection']['required_status_checks'] = {'contexts': ['mandatory-ci']}
@@ -238,6 +249,8 @@ class ExecutionMergeGatesTest(unittest.TestCase):
                 self.assertNotIn('--admin', ready['command'])
                 blocked = self.plan(preset, historical_authors=True, permissions={'pull': True})
                 self.assertIn('merge_actor_permission_missing', [item['code'] for item in blocked['blockers']])
+                unknown = self.plan(preset, historical_authors=True, permissions={'push': True}, observed_actor=None)
+                self.assertIn('merge_actor_unknown', [item['code'] for item in unknown['blockers']])
 
     def test_minimal_missing_targeted_test_evidence_blocks_without_waiting_for_smoke(self):
         blocked = self.plan('minimal', tests=False)
