@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.49.1 - 2026-11-26
+
+- Publish a selected coordinated stack without dereferencing unchanged foreign recipe history. Preserve exact remote state/ref checks, structural validation and target validation; report incomplete integration classification explicitly. Keep dependency closure outside the deferral scope.
+
 ## 0.49.0 - 2026-11-26
 
 - Add private worktree preference overrides bound to stable lane IDs and generations, with explicit stale rebinding and inherited values. Recheck the lane under the registry lock before profile CAS, resolve each lane independently during admission and cleanup, and preserve physical locks, ownership, refs and lane records. General preset selection remains unavailable.
