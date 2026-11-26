@@ -21,7 +21,7 @@ This exception does not change application authority or server rules.
 
 ## Independent review and merge
 
-Follow the installable [agent instructions](https://github.com/NestDevLab/syncwheel/blob/main/docs/ai-agents.md#independent-review-and-merge) for authority preflight, independent reviewer assignment and exact-head delivery. The [GitHub merge contract](https://github.com/NestDevLab/syncwheel/blob/main/docs/github-pr-merge.md#review-evidence-and-formal-review-gates) defines the narrowly authorized formal-review exception; it is not a default permission.
+Follow the [agent instructions](https://github.com/NestDevLab/syncwheel/blob/main/docs/ai-agents.md#independent-review-and-merge) for authority preflight, independent reviewer assignment and exact-head delivery. The [GitHub merge contract](https://github.com/NestDevLab/syncwheel/blob/main/docs/github-pr-merge.md#review-evidence-and-formal-review-gates) defines the narrowly authorized formal-review exception; it is not a default permission.
 
 ## Optional execution preferences
 

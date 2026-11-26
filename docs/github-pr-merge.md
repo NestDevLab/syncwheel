@@ -19,10 +19,11 @@ approval rule. Never invent an identity or change governance implicitly.
 A private `allowed_bypasses: [required_reviews]` policy is usable only after explicit
 authorization for the repository, permitted bases, merge actor and source provenance.
 Inspect authority and `repo pr-merge-policy status --json` before selecting it;
-configuration is not itself authorization. The planner must prove formal review
-is the sole remaining blocker, with independent technical READY at the exact SHA
-and green exact-head CI recorded separately. It does not ingest or authenticate a
-subagent's verdict. Changes requested, unresolved threads, conflicts, stale bases,
+configuration is not itself authorization. The operator must verify independent technical READY and green CI externally
+at the exact SHA; a legacy policy may allow `checks: "none"`, so planner readiness
+alone does not prove those conditions. The plan must have no other blockers and
+select only the proven formal-review path. The planner does not ingest or
+authenticate a subagent's verdict. Changes requested, unresolved threads, conflicts, stale bases,
 merge queues and unknown observations still block. Explicit human-gated governance
 remains binding. Operational execution preferences currently clear these legacy
 bypasses: `disabled` or `minimal` does not enable this exception.
