@@ -7409,16 +7409,31 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assert_selective_compose_preserves_foreign_work(
             missing_remote_ref=True, foreign_count=9)
 
+    def test_disabled_preset_composes_with_missing_foreign_ref(self):
+        self.assert_selective_compose_preserves_foreign_work(
+            missing_remote_ref=True, preset='disabled')
+
+    def test_minimal_preset_composes_with_missing_foreign_ref(self):
+        self.assert_selective_compose_preserves_foreign_work(
+            missing_remote_ref=True, preset='minimal')
+
     def test_foreign_ref_loss_after_plan_does_not_block_selected_publication(self):
         self.assert_selective_compose_preserves_foreign_work(remove_after_plan=True)
 
     def assert_selective_compose_preserves_foreign_work(
         self, *, missing_remote_ref=False, missing_integration_ref=False,
-        diverged_remote_ref=False, kill_after_push=False, foreign_count=1, remove_after_plan=False
+        diverged_remote_ref=False, kill_after_push=False, foreign_count=1, remove_after_plan=False,
+        preset=None
     ):
         fixture = self.prepare_additive_compose('compose-foreign-recipe', plan=False,
                                                 foreign_count=foreign_count)
         repo, module = fixture['repo'], fixture['module']
+        if preset:
+            self.run_cli(repo, 'self', 'execution-policy', 'set', '--preset', preset,
+                         '--apply', '--json')
+            selected = json.loads(self.run_cli(
+                repo, 'self', 'execution-policy', 'status', '--json').stdout)
+            self.assertEqual(selected['effective']['expiry'], 'off')
         # A synthetic stable CLI outside the lane is required by the real guard.
         stable = self.tmp / 'stable-cli'
         shutil.copytree(REPO_ROOT / 'scripts', stable,
