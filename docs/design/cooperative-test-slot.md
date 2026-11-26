@@ -163,13 +163,16 @@ incidental candidate/index writes. A changed input or residue is reported,
 never silently reset or deleted.
 
 ```sh
+syncwheel-test-slot status "$slot_workspace"
 syncwheel-test-slot inspect "$slot_workspace" request.json
 syncwheel-test-slot run "$slot_workspace" request.json --timeout 300
 syncwheel-test-slot recover "$slot_workspace" RECORDED_NONCE
 syncwheel-test-slot cleanup "$slot_workspace" RECORDED_NONCE
 ```
 
-`inspect` derives verified request fields without dispatch. `run` records the
+`status` reads the canonical active operation and retained receipts, including
+the nonce needed after a lost coordinator reply. Reconcile that record before
+requesting another run. `inspect` derives verified request fields without dispatch. `run` records the
 reservation before starting a nonce-owned unit. `recover` observes that same
 unit, never launches another. Receipt/release is one CAS operation after
 verified physical termination; failed qualification can release a physically

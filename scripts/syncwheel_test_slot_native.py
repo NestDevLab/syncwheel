@@ -4,7 +4,6 @@ This adapter is deliberately separate from publication and managed-worktree
 startup. The selected argv is trusted cooperative test code, not a sandbox.
 """
 
-import argparse
 import hashlib
 import json
 import os
@@ -154,7 +153,7 @@ class NativeCooperativeJob:
 
     def expected_configuration(self, operation, timeout):
         nonce = operation['nonce']
-        argv = [sys.executable, str(Path(__file__).resolve()), '_worker', str(self.store.path), nonce]
+        argv = self.api.test_slot_worker_argv(self.store.path, nonce)
         return {'Type': 'exec', 'ExitType': 'cgroup', 'KillMode': 'control-group',
                 'RemainAfterExit': 'yes', 'Restart': 'no', 'CPUAccounting': 'yes', 'MemoryAccounting': 'yes',
                 'WorkingDirectory': str(self.workspace),
@@ -290,7 +289,7 @@ class NativeCooperativeJob:
         self.manager('systemctl', '--user', 'stop', operation['unit'])
 
 
-def worker(path, nonce):
+def worker(path, nonce, configuration):
     path = Path(path)
     while True:
         snapshot = json.loads(path.read_text())
@@ -310,7 +309,6 @@ def worker(path, nonce):
         time.sleep(0.02)
     request = operation['request']
     directory = path.parent / 'syncwheel-test-jobs' / nonce
-    import syncwheel as configuration
     preparation = {'nonce': nonce, 'invocation': operation['binding']['invocation'],
                    'request_digest': operation['request_digest'], 'passed': False,
                    'method': 'existing ReplayEngine channel projection'}
@@ -357,18 +355,13 @@ def worker(path, nonce):
         raise
 
 
-def run_cli():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['inspect', 'run', 'recover', 'cleanup', '_worker'])
-    parser.add_argument('workspace')
-    parser.add_argument('input', help='reviewed request JSON for run; recorded nonce for recover/cleanup')
-    parser.add_argument('--timeout', type=int, default=300)
-    args = parser.parse_args()
+def execute_test_slot(args, configuration):
     if args.action == '_worker':
-        return worker(args.workspace, args.input)
-    import syncwheel as configuration
+        return worker(args.workspace, args.input, configuration)
     job = NativeCooperativeJob(args.workspace, configuration)
-    if args.action == 'inspect':
+    if args.action == 'status':
+        result = dict(job.store.load())
+    elif args.action == 'inspect':
         result = job.derive_request(json.loads(Path(args.input).read_text()))
     elif args.action == 'run':
         request = json.loads(Path(args.input).read_text())
@@ -379,17 +372,5 @@ def run_cli():
     else:
         job.cleanup(args.input)
         result = {'nonce': args.input, 'cleanup': 'succeeded'}
-    print(json.dumps(result, indent=2))
-    return 0 if result.get('qualified', True) else 2
+    return result
 
-
-def main():
-    try:
-        return run_cli()
-    except (SyncwheelError, OSError, ValueError) as error:
-        print(str(error), file=sys.stderr)
-        return 2
-
-
-if __name__ == '__main__':
-    raise SystemExit(main())

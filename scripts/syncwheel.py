@@ -22692,5 +22692,49 @@ class _RevisionCoordinationFactory:
         return _publication_coordinator(root)
 
 
+def test_slot_entry_argv(arguments):
+    """Application-owned bootstrap; the native adapter receives only argv."""
+    bootstrap = (
+        "import importlib.util, sys; path = sys.argv.pop(1); "
+        "spec = importlib.util.spec_from_file_location('syncwheel_slot_entry', path); "
+        "module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; "
+        "spec.loader.exec_module(module); raise SystemExit(module.main_test_slot())"
+    )
+    return [sys.executable, '-I', '-c', bootstrap, str(Path(__file__).resolve()),
+            *[str(value) for value in arguments]]
+
+
+def test_slot_worker_argv(path, nonce):
+    return test_slot_entry_argv(['_worker', path, nonce])
+
+
+def main_test_slot(argv=None):
+    """Thin standalone transport; no ordinary delivery startup is invoked."""
+    from types import SimpleNamespace
+    from syncwheel_cli import build_test_slot_parser
+    from syncwheel_test_slot_native import execute_test_slot
+    capabilities = SimpleNamespace(
+        load_private_configuration=load_private_configuration,
+        save_private_configuration=save_private_configuration,
+        require_channel_materialization_valid=require_channel_materialization_valid,
+        ref_tip=ref_tip, materialize_channel_tree=materialize_channel_tree,
+        atomic_write_private_json=atomic_write_private_json,
+        test_slot_worker_argv=test_slot_worker_argv,
+    )
+    parser = build_test_slot_parser()
+    args = parser.parse_args(argv)
+    if args.action != 'status' and args.input is None:
+        parser.error('this action requires a request file or recorded nonce')
+    try:
+        result = execute_test_slot(args, capabilities)
+        if args.action == '_worker':
+            return result
+        print(json.dumps(result, indent=2))
+        return 0 if result.get('qualified', True) else 2
+    except (SyncwheelError, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
 if __name__ == '__main__':
     raise SystemExit(main())
