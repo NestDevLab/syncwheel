@@ -16,6 +16,12 @@ CLI = Path(__file__).resolve().parents[1] / 'scripts' / 'syncwheel.py'
 
 class PublishedRecipeFreshCloneTest(unittest.TestCase):
     def test_contention_retry_and_fresh_clone_recipe_preserve_foreign_lane(self):
+        self.assert_contention_and_fresh_clone_preserve_foreign_lane()
+
+    def test_missing_foreign_ref_survives_contention_retry_and_fresh_clone(self):
+        self.assert_contention_and_fresh_clone_preserve_foreign_lane(missing_foreign_ref=True)
+
+    def assert_contention_and_fresh_clone_preserve_foreign_lane(self, *, missing_foreign_ref=False):
         with tempfile.TemporaryDirectory(prefix='syncwheel-cas-') as temp:
             root = Path(temp)
             remote, seed = root / 'remote.git', root / 'seed'
@@ -86,6 +92,9 @@ class PublishedRecipeFreshCloneTest(unittest.TestCase):
             self.assertTrue(json.loads(sw(second, 'hooks', 'status'))['ready'])
             base = git(first, 'rev-parse', 'origin/main')
             sw(first, 'stack', 'create', 'foreign', '--branch', 'pr/foreign', '--base', base)
+            git(first, 'branch', 'pr/foreign', base)
+            sw(first, 'stack', 'push', 'foreign')
+            sw(second, 'stack', 'create', 'foreign', '--branch', 'pr/foreign', '--base', base)
             foreign_record = json.loads(call(
                 [sys.executable, str(CLI), 'worktree', 'open', 'foreign-lane', '--into',
                  'foreign', '--base', base, '--json'], first,
@@ -135,6 +144,10 @@ class PublishedRecipeFreshCloneTest(unittest.TestCase):
                 args = ['stack', 'set', name, '--base', base, '--adopt-tip', tip]
                 preview = json.loads(sw(repo, *args))
                 sw(repo, *args, '--plan-digest', preview['planDigest'], '--apply')
+            if missing_foreign_ref:
+                self.assertTrue(git(first, 'ls-remote', 'origin', 'refs/heads/pr/foreign'))
+                call(['git', '--git-dir', str(remote), 'update-ref', '-d', 'refs/heads/pr/foreign'])
+            for name, repo in (('one', first), ('two', second)):
                 plan = json.loads(sw(repo, 'coordination', 'compose', '--stack', name,
                                      '--known-base-state', state, '--known-base-manifest-digest', digest))
                 self.assertEqual(plan['expectedRemoteStateTip'], state)

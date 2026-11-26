@@ -17,6 +17,7 @@ import time
 import uuid
 from typing import Protocol
 
+import syncwheel_selective_publication as selective
 import syncwheel_coordination as snapshot_model
 import syncwheel_publication_intents as _publication_policy
 from syncwheel_contracts import (
@@ -938,13 +939,14 @@ class PublicationCoordinator:
         remedy_stack=None,
         creation_remedy=False,
         manifest_path=None,
+        ref_validation_scope=None,
     ):
         """Fail closed when a stale manifest would erase or overwrite published state."""
         repo_root = self.repository.root
         state = expected.get('state') if expected else None
         if not state:
             return None
-        if not self.coordination_state_matches_remote(config, state):
+        if not self.coordination_state_matches_ref_scope(config, state, ref_validation_scope):
             raise SyncwheelError(
                 'published coordination state no longer matches its managed remote refs; run handoff and resolve manually'
             )
@@ -1259,6 +1261,7 @@ class PublicationCoordinator:
         projection_status,
         manifest_digest_value,
         operation_token,
+        ref_validation_scope=None,
     ):
         repo_root = self.repository.root
         operation = {
@@ -1270,7 +1273,7 @@ class PublicationCoordinator:
         }
         if not coordination_state_document_matches_operation(state, operation):
             return False
-        if not self.coordination_state_matches_remote(config, state):
+        if not self.coordination_state_matches_ref_scope(config, state, ref_validation_scope):
             return False
         claim_refs = {source_ref: coordination_claim_ref(source_ref) for source_ref in touched_refs}
         observed = self.states.remote_ref_tips(config['remote'], claim_refs.values())
@@ -1309,6 +1312,7 @@ class PublicationCoordinator:
         operation_token=None,
         publication_manifest=None,
         adopt_remote_tips=None,
+        ref_validation_scope=None,
     ):
         repo_root = self.repository.root
         config = coordination_config(manifest)
@@ -1375,6 +1379,10 @@ class PublicationCoordinator:
             changed_refs[integration_ref] = self.repository.ref_tip(
                 repo_root, manifest['integration']['branch']
             )
+        selective.require_compose_ref_validation_scope(
+            ref_validation_scope, publication_manifest,
+            self.coordination_manifest_snapshot(publication_manifest, repo_root),
+            expected.get('state'), scope)
         touched_refs = list(changed_refs)
         managed = managed_ref_names(publication_manifest)
         if tombstone:
@@ -1411,6 +1419,7 @@ class PublicationCoordinator:
                 projection_status,
                 desired_manifest_digest,
                 operation_token,
+                ref_validation_scope=ref_validation_scope,
             )
         ):
             report_advisory_unclaimed_owned_refs(config, expected['state'])
@@ -1458,13 +1467,14 @@ class PublicationCoordinator:
             )
         self.states.require_exclusive_coordination_ownership(
             config,
-            managed,
+            selective.required_ref_values(dict.fromkeys(managed), ref_validation_scope),
             expected_state_refs=expected_coordination_state_refs,
         )
         claim_refs = {ref: coordination_claim_ref(ref) for ref in touched_refs}
         observation_refs = list(dict.fromkeys([*managed, *claim_refs.values()]))
         full_observation = self.states.remote_ref_tips(config['remote'], observation_refs)
-        if full_observation.get(integration_ref) is None and integration_ref not in changed_refs:
+        if (full_observation.get(integration_ref) is None and integration_ref not in changed_refs
+                and (ref_validation_scope is None or integration_ref not in ref_validation_scope['preservedRefs'])):
             if stack_scope:
                 raise SyncwheelError(
                     'stack publication requires an existing published integration ref; '
@@ -1511,7 +1521,7 @@ class PublicationCoordinator:
             planned_observations = {
                 ref: expected_observed_refs.get(ref) for ref in observation_refs
             }
-            if full_observation != planned_observations:
+            if selective.required_ref_values(full_observation, ref_validation_scope) != selective.required_ref_values(planned_observations, ref_validation_scope):
                 raise SyncwheelError(
                     'coordinated publish STOP: managed refs changed after the reviewed plan'
                 )
@@ -1554,7 +1564,9 @@ class PublicationCoordinator:
             remedy_stack=remedy_stack,
             creation_remedy=creation_remedy,
             manifest_path=manifest_path,
+            ref_validation_scope=ref_validation_scope,
         )
+        observed_refs = selective.required_ref_values(observed_refs, ref_validation_scope)
         for ref, sha in changed_refs.items():
             if not sha:
                 raise SyncwheelError(f'cannot publish an empty managed ref: {ref}')
@@ -1816,6 +1828,13 @@ class PublicationCoordinator:
         object_format = self.repository.git(repo_root, 'rev-parse', '--show-object-format').stdout.strip()
         if object_format != 'sha1':
             raise SyncwheelError(f'{operation} supports only SHA-1 repositories; found {object_format}')
+
+    def coordination_state_matches_ref_scope(self, config, state, scope):
+        if scope is None:
+            return self.coordination_state_matches_remote(config, state)
+        expected = selective.required_ref_values(state.get('managed_refs') or {}, scope)
+        observed = self.states.remote_ref_tips(config['remote'], expected)
+        return observed == expected
 
     def coordination_state_matches_remote(self, config, state):
         repo_root = self.repository.root

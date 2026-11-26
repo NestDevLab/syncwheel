@@ -6,6 +6,7 @@ import os
 import signal
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -1326,7 +1327,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                     fixture['repo'], fixture['manifest'], fixture['recorded'], observation,
                 )
 
-    def prepare_additive_compose(self, name='additive-compose', plan=True):
+    def prepare_additive_compose(self, name='additive-compose', plan=True, foreign_count=1):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
         self.init_coordinated(repo, integration_membership='required')
@@ -1342,9 +1343,13 @@ with module.coordination_publication_lock(Path(repo_path)):
         base_tip, base_state = self.remote_state(origin)
         base_manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
 
-        orphan_tip = self.commit_on_branch(repo, 'pr/orphan', 'orphan.txt')
-        self.run_cli(repo, 'stack', 'create', 'orphan', orphan_tip, '--branch', 'pr/orphan')
-        self.run_cli(repo, 'stack', 'push', 'orphan')
+        for index in range(foreign_count):
+            stack_id = 'orphan' if index == 0 else f'orphan-{index}'
+            tip = self.commit_on_branch(repo, f'pr/{stack_id}', f'{stack_id}.txt')
+            if index == 0:
+                orphan_tip = tip
+            self.run_cli(repo, 'stack', 'create', stack_id, tip, '--branch', f'pr/{stack_id}')
+            self.run_cli(repo, 'stack', 'push', stack_id)
         remote_tip, remote_state = self.remote_state(origin)
 
         (repo / '.syncwheel' / 'manifest.json').write_text(
@@ -7115,7 +7120,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.assertEqual(module.commit_parent_count(fixture['repo'], commit), 1)
             self.assertTrue(module.is_manifest_only_commit(fixture['repo'], commit))
 
-    def test_compose_rejects_product_and_merge_local_integration_suffixes(self):
+    def test_scoped_compose_diagnoses_product_and_merge_local_projection(self):
         product = self.prepare_additive_compose('compose-product-suffix', plan=False)
         product_path = product['repo'] / 'unexpected-product.txt'
         product_path.write_text('unexpected\n')
@@ -7125,10 +7130,14 @@ with module.coordination_publication_lock(Path(repo_path)):
             product['module'].SyncwheelError,
             'linear manifest-only control suffix',
         ):
-            product['module'].coordination_compose_stack_plan(
-                product['repo'], product['manifest'], 'new-stack',
-                product['base_tip'], product['base_state']['manifest_digest'],
-            )
+            product['module'].coordination_compose_local_control_suffix(
+                product['repo'], product['integration_tip'],
+                product['module'].ref_tip(product['repo'], 'integration/shared'))
+        product_plan, _, _ = product['module'].coordination_compose_stack_plan(
+            product['repo'], product['manifest'], 'new-stack',
+            product['base_tip'], product['base_state']['manifest_digest'])
+        self.assertEqual(product_plan['localProjectionStatus'], 'unqualified')
+        self.assertIsNone(product_plan['localIntegrationControlSuffix'])
 
         merged = self.prepare_additive_compose('compose-merge-suffix', plan=False)
         module = merged['module']
@@ -7151,10 +7160,50 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.SyncwheelError,
             'linear manifest-only control suffix',
         ):
-            module.coordination_compose_stack_plan(
-                merged['repo'], merged['manifest'], 'new-stack',
-                merged['base_tip'], merged['base_state']['manifest_digest'],
-            )
+            module.coordination_compose_local_control_suffix(
+                merged['repo'], merged['integration_tip'], merge_tip)
+        merge_plan, _, _ = module.coordination_compose_stack_plan(
+            merged['repo'], merged['manifest'], 'new-stack',
+            merged['base_tip'], merged['base_state']['manifest_digest'])
+        self.assertEqual(merge_plan['localProjectionStatus'], 'unqualified')
+        self.assertIsNone(merge_plan['localIntegrationControlSuffix'])
+
+    def test_selective_compose_preserves_unqualified_local_product_history(self):
+        fixture = self.prepare_additive_compose('compose-local-private-product', plan=False)
+        module, repo = fixture['module'], fixture['repo']
+        product = repo / 'private-local-product.txt'
+        product.write_text('private product outside the selected source\n')
+        product.chmod(0o755)
+        self.git(repo, 'add', product.name)
+        self.git(repo, 'commit', '-qm', 'test: preserve unrelated local product')
+        private_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        product_entry = self.git(repo, 'ls-tree', 'HEAD', '--', product.name).stdout
+        remote_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        plan, _, _ = module.coordination_compose_stack_plan(
+            repo, fixture['manifest'], 'new-stack', fixture['base_tip'],
+            fixture['base_state']['manifest_digest'])
+        self.assertEqual(plan['localProjectionStatus'], 'unqualified')
+        self.assertIsNone(plan['localIntegrationControlSuffix'])
+        plan_file = self.tmp / 'local-private-product-plan.json'
+        plan_file.write_text(json.dumps(plan))
+        self.run_cli(repo, 'coordination', 'compose', '--apply', '--plan-file', str(plan_file))
+        after = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.assertEqual(self.git(repo, 'rev-parse', 'HEAD^').stdout.strip(), private_tip)
+        self.assertEqual(self.git(repo, 'ls-tree', 'HEAD', '--', product.name).stdout, product_entry)
+        changed_paths = self.git(repo, 'diff', '--name-only', private_tip, after).stdout.splitlines()
+        self.assertEqual(changed_paths, ['.syncwheel/manifest.json'])
+        before_refs = dict(line.split()[::-1] for line in remote_before.splitlines())
+        after_refs = dict(line.split()[::-1] for line in self.git(
+            repo, 'ls-remote', '--heads', 'origin').stdout.splitlines())
+        changed_refs = {ref for ref in set(before_refs) | set(after_refs)
+                        if before_refs.get(ref) != after_refs.get(ref)}
+        self.assertEqual(changed_refs, {'refs/heads/pr/new-stack',
+                                       'refs/heads/syncwheel/claim/heads/pr/new-stack',
+                                       'refs/heads/syncwheel/state/default'})
+        absent = subprocess.run(['git', '--git-dir', str(fixture['origin']),
+                                 'cat-file', '-e', private_tip + '^{commit}'], capture_output=True)
+        self.assertNotEqual(absent.returncode, 0, 'unselected private product reached the remote')
+        self.assertFalse(self.git(repo, 'status', '--porcelain').stdout)
 
     def test_compose_detects_local_integration_races(self):
         planning = self.prepare_additive_compose('compose-local-plan-race', plan=False)
@@ -7283,7 +7332,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                 )
                 self.assertIn(expected_failure, failure)
 
-    def test_compose_rejects_missing_behind_and_diverged_local_integration(self):
+    def test_scoped_compose_requires_control_target_and_diagnoses_its_projection(self):
         for relation in ('missing', 'behind', 'diverged'):
             with self.subTest(relation=relation):
                 fixture = self.prepare_additive_compose(
@@ -7319,10 +7368,20 @@ with module.coordination_publication_lock(Path(repo_path)):
                 with self.assertRaisesRegex(
                     module.SyncwheelError, 'linear manifest-only control suffix'
                 ):
-                    module.coordination_compose_stack_plan(
+                    module.coordination_compose_local_control_suffix(
+                        fixture['repo'], published_tip,
+                        module.ref_tip(fixture['repo'], 'integration/shared'))
+                if relation == 'missing':
+                    with self.assertRaisesRegex(module.SyncwheelError, 'metadata control target is unavailable'):
+                        module.coordination_compose_stack_plan(
+                            fixture['repo'], fixture['manifest'], 'new-stack',
+                            fixture['base_tip'], fixture['base_state']['manifest_digest'])
+                else:
+                    plan, _, _ = module.coordination_compose_stack_plan(
                         fixture['repo'], fixture['manifest'], 'new-stack',
-                        fixture['base_tip'], fixture['base_state']['manifest_digest'],
-                    )
+                        fixture['base_tip'], fixture['base_state']['manifest_digest'])
+                    self.assertEqual(plan['localProjectionStatus'], 'unqualified')
+                    self.assertEqual(plan['localIntegrationTip'], replacement)
                 self.assertEqual(
                     self.git(
                         fixture['repo'], 'ls-remote', '--heads', 'origin'
@@ -7331,7 +7390,34 @@ with module.coordination_publication_lock(Path(repo_path)):
                 )
 
     def test_compose_selected_stack_without_foreign_recipe_objects(self):
-        fixture = self.prepare_additive_compose('compose-foreign-recipe', plan=False)
+        self.assert_selective_compose_preserves_foreign_work()
+
+    def test_compose_selected_stack_with_missing_foreign_remote_ref(self):
+        self.assert_selective_compose_preserves_foreign_work(missing_remote_ref=True)
+
+    def test_compose_selected_stack_with_missing_historical_integration_ref(self):
+        self.assert_selective_compose_preserves_foreign_work(missing_integration_ref=True)
+
+    def test_compose_selected_stack_with_diverged_foreign_remote_ref(self):
+        self.assert_selective_compose_preserves_foreign_work(diverged_remote_ref=True)
+
+    def test_selective_compose_recovers_after_push_sigkill_with_missing_foreign_ref(self):
+        self.assert_selective_compose_preserves_foreign_work(
+            missing_remote_ref=True, kill_after_push=True)
+
+    def test_compose_selected_stack_with_nine_unrelated_remote_recipes(self):
+        self.assert_selective_compose_preserves_foreign_work(
+            missing_remote_ref=True, foreign_count=9)
+
+    def test_foreign_ref_loss_after_plan_does_not_block_selected_publication(self):
+        self.assert_selective_compose_preserves_foreign_work(remove_after_plan=True)
+
+    def assert_selective_compose_preserves_foreign_work(
+        self, *, missing_remote_ref=False, missing_integration_ref=False,
+        diverged_remote_ref=False, kill_after_push=False, foreign_count=1, remove_after_plan=False
+    ):
+        fixture = self.prepare_additive_compose('compose-foreign-recipe', plan=False,
+                                                foreign_count=foreign_count)
         repo, module = fixture['repo'], fixture['module']
         # A synthetic stable CLI outside the lane is required by the real guard.
         stable = self.tmp / 'stable-cli'
@@ -7394,6 +7480,16 @@ with module.coordination_publication_lock(Path(repo_path)):
             subprocess.run(['git', 'cat-file', '-e', foreign + '^{commit}'],
                            cwd=repo, capture_output=True).returncode, 0,
         )
+        if missing_remote_ref:
+            subprocess.run(['git', '--git-dir', str(fixture['origin']),
+                            'update-ref', '-d', 'refs/heads/pr/orphan'], check=True)
+        if missing_integration_ref:
+            subprocess.run(['git', '--git-dir', str(fixture['origin']), 'update-ref', '-d',
+                            'refs/heads/integration/shared'], check=True)
+        if diverged_remote_ref:
+            subprocess.run(['git', '--git-dir', str(fixture['origin']), 'update-ref',
+                            'refs/heads/pr/orphan', self.git(repo, 'rev-parse', 'origin/main').stdout.strip()],
+                           check=True)
         remote_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
         foreign_before = fixture['remote_state']['manifest']['stacks']
 
@@ -7425,7 +7521,11 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertFalse(plan['integrationMutation'])
         self.assertEqual(plan['expectedIntegrationTip'], fixture['integration_tip'])
         self.assertEqual(plan['composedSnapshot']['stacks'][:-1], foreign_before)
-        self.assertEqual(plan['deferredForeignHistory'], ['orphan'])
+        self.assertEqual(plan['deferredForeignHistory'],
+                         sorted(stack['id'] for stack in foreign_before))
+        if missing_remote_ref:
+            self.assertEqual(plan['foreignRefObservations']['refs/heads/pr/orphan']['status'], 'missing')
+            self.assertFalse(plan['foreignRefObservations']['refs/heads/pr/orphan']['qualified'])
         self.assertFalse(plan['unmappedIntegrationClassificationComplete'])
         self.assertEqual(plan['sourceRef'], 'refs/heads/pr/new-stack')
         cli_preview = self.run_cli(
@@ -7438,8 +7538,38 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(held_snapshot(), held_before)
         plan_path = self.tmp / 'selective-compose-plan.json'
         plan_path.write_text(json.dumps(cli_plan))
+        if remove_after_plan:
+            subprocess.run(['git', '--git-dir', str(fixture['origin']), 'update-ref', '-d',
+                            'refs/heads/pr/orphan'], check=True)
+            remote_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        if kill_after_push:
+            self.run_cli_sigkill_after(repo, 'authorized_push', 'coordination', 'compose',
+                                       '--apply', '--plan-file', str(plan_path))
+            landed_refs = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+            self.assertEqual(held_snapshot(), held_before)
+            stale, _ = module.load_manifest(repo, fixture['manifest_path'])
+            retry_plan, _, _ = module.coordination_compose_stack_plan(
+                repo, stale, 'new-stack', fixture['base_tip'],
+                fixture['base_state']['manifest_digest'])
+            self.assertEqual(retry_plan['status'], 'adopt-only')
+            plan_path.write_text(json.dumps(retry_plan))
+            original_git = shutil.which('git')
+            push_attempt = self.tmp / 'unexpected-recovery-push'
+            git_wrapper = self.bin_dir / 'git'
+            git_wrapper.write_text(
+                '#!' + sys.executable + '\nimport os, pathlib, sys\n'
+                'if "push" in sys.argv[1:]:\n'
+                ' pathlib.Path(' + repr(str(push_attempt)) + ').write_text("push attempted")\n'
+                ' raise SystemExit(99)\n'
+                'os.execv(' + repr(original_git) + ', [' + repr(original_git) + ', *sys.argv[1:]])\n')
+            git_wrapper.chmod(0o755)
         applied = self.run_cli(repo, 'coordination', 'compose', '--apply',
                                '--plan-file', str(plan_path))
+        if kill_after_push:
+            self.assertFalse(push_attempt.exists())
+            self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, landed_refs)
+            self.assertFalse(module.pending_coordination_publications(repo, fixture['manifest_path']))
+
         self.assertIn('\"unmapped_integration_classification_complete\": false', applied.stdout)
         self.assertIn('\"deferred_foreign_history\": [', applied.stdout)
         _, state_after = self.remote_state(fixture['origin'])
@@ -7449,6 +7579,75 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(state_after['managed_refs']['refs/heads/pr/orphan'],
                          fixture['remote_state']['managed_refs']['refs/heads/pr/orphan'])
         self.assertEqual(held_snapshot(), held_before)
+        after_refs = dict(line.split()[::-1] for line in self.git(
+            repo, 'ls-remote', '--heads', 'origin').stdout.splitlines())
+        before_refs = dict(line.split()[::-1] for line in remote_before.splitlines())
+        changed = {ref for ref in set(before_refs) | set(after_refs)
+                   if before_refs.get(ref) != after_refs.get(ref)}
+        self.assertEqual(changed, {'refs/heads/pr/new-stack',
+                                  'refs/heads/syncwheel/claim/heads/pr/new-stack',
+                                  'refs/heads/syncwheel/state/default'})
+        receipt = json.loads(applied.stdout[applied.stdout.index('{'):])
+        if remove_after_plan:
+            self.assertEqual(receipt['foreign_ref_observations']['refs/heads/pr/orphan']['status'], 'missing')
+            self.assertFalse(receipt['foreign_ref_observations']['refs/heads/pr/orphan']['qualified'])
+        if missing_integration_ref:
+            self.assertEqual(receipt['foreign_ref_observations'][
+                'refs/heads/integration/shared']['status'], 'missing')
+        if diverged_remote_ref:
+            self.assertEqual(receipt['foreign_ref_observations'][
+                'refs/heads/pr/orphan']['status'], 'diverged')
+
+    def test_selective_ref_scope_preserves_required_guards(self):
+        fixture = self.prepare_additive_compose('compose-selective-negative', plan=False)
+        module, repo = fixture['module'], fixture['repo']
+        subprocess.run(['git', '--git-dir', str(fixture['origin']), 'update-ref', '-d',
+                        'refs/heads/pr/orphan'], check=True)
+        plan, proposed, _ = module.coordination_compose_stack_plan(
+            repo, fixture['manifest'], 'new-stack', fixture['base_tip'],
+            fixture['base_state']['manifest_digest'])
+        before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        forged = json.loads(json.dumps(plan))
+        forged['refValidationScope']['requiredRefs'] = []
+        forged['planDigest'] = module.canonical_json_digest(
+            {key: value for key, value in forged.items() if key != 'planDigest'})
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_compose_stack_plan(
+                repo, fixture['manifest'], fixture['manifest_path'], forged)
+        dependency_manifest = json.loads(json.dumps(fixture['manifest']))
+        dependency_manifest['stacks'][0]['base'] = 'origin/pr/orphan'
+        with self.assertRaisesRegex(module.SyncwheelError, 'does not match managed refs'):
+            module.coordination_compose_stack_plan(
+                repo, dependency_manifest, 'new-stack', fixture['base_tip'],
+                fixture['base_state']['manifest_digest'])
+        with mock.patch.object(module, 'verify_coordination_state_manifest_digest',
+                               side_effect=module.SyncwheelError('invalid historical control anchor')):
+            with self.assertRaisesRegex(module.SyncwheelError, 'invalid historical control anchor'):
+                module.coordination_compose_stack_plan(
+                    repo, fixture['manifest'], 'new-stack', fixture['base_tip'],
+                    fixture['base_state']['manifest_digest'])
+        config = module.coordination_config(proposed)
+        self.assertFalse(module.coordination_state_matches_remote(repo, config, fixture['remote_state']))
+        # The global publication API and v3 never acquire a selective bypass.
+        for version in (2, 3):
+            global_manifest = json.loads(json.dumps(proposed))
+            global_manifest['version'] = version
+            with self.subTest(version=version), self.assertRaisesRegex(
+                    module.SyncwheelError, 'no longer matches its managed remote refs'):
+                module._publication_coordinator(repo).validate_coordination_publication_base(
+                    global_manifest, config, {'state': fixture['remote_state'], 'tip': fixture['remote_tip']},
+                    {plan['sourceRef']: plan['sourceTip']})
+        self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, before)
+        claim_ref = module.coordination_claim_ref(plan['sourceRef'])
+        claim = module.create_coordination_claim_commit(
+            repo, plan['sourceRef'], 'another-domain', 'another-operation', None)
+        self.git(repo, 'push', '--no-verify', 'origin', f'{claim}:{claim_ref}')
+        claimed_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        with self.assertRaises(module.SyncwheelError):
+            module.apply_coordination_compose_stack_plan(
+                repo, fixture['manifest'], fixture['manifest_path'], plan)
+        self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, claimed_before)
+        self.assertFalse(module.remote_ref_tips(repo, 'origin', [plan['sourceRef']])[plan['sourceRef']])
 
     def test_deferred_stack_structural_errors_are_still_rejected(self):
         fixture = self.prepare_additive_compose('compose-foreign-structure', plan=False)
