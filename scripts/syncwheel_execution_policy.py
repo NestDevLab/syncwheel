@@ -183,8 +183,13 @@ def sensitive_paths(paths):
     # Instructions and unknown files are sensitive. Ordinary documentation-only
     # changes may omit the optional sensitive review.
     instruction_names = {'AGENT.md', 'AGENTS.md', 'SKILL.md'}
-    return any(Path(path).name in instruction_names or not path.endswith(('.md', '.rst', '.txt'))
-               for path in paths)
+    instruction_directories = {
+        'instructions', 'rules', 'roles', 'subagents', 'fragments', 'skills',
+        '.agents', '.codex', '.claude', '.openclaw', '.hermes', '.github',
+    }
+    return any(Path(path).name in instruction_names
+               or any(part in instruction_directories for part in Path(path).parts[:-1])
+               or not path.endswith(('.md', '.rst', '.txt')) for path in paths)
 
 
 def merge_floor(profile):

@@ -163,6 +163,15 @@ class ExecutionEvidenceTest(unittest.TestCase):
         self.assertEqual(consumed['review']['reviewer'], 'reviewer')
         self.assertFalse(execution.sensitive_paths(['docs/change.md']))
         self.assertTrue(execution.sensitive_paths(['docs/generate.py']))
+        without_review = execution.record_receipts({}, [receipt(head, 'tests')])
+        for path in ('rules/safety.md', 'instructions/core.md', 'roles/developer.md',
+                     'subagents/reviewer.md', 'fragments/core.md', 'skills/check/SKILL.md',
+                     '.agents/rules/check.md', '.codex/rules/check.md', '.claude/rules/check.md'):
+            with self.subTest(path=path):
+                self.assertTrue(execution.sensitive_paths([path]))
+                blocked, _ = execution.candidate_gates(report, without_review, head,
+                    sensitive=execution.sensitive_paths([path]))
+                self.assertIn('independent_review_evidence_missing', [item['code'] for item in blocked])
 
     def test_merge_floor_keeps_original_provenance_and_disabled_does_not_weaken_it(self):
         report = resolve_preferences({'worktree_policy': {'preset': 'disabled'}})
