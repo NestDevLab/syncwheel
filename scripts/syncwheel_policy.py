@@ -78,11 +78,16 @@ def configuration_values(document, label, *, fields=None, allow_presets=True):
         raise SyncwheelError(f'invalid {label}.{POLICY_KEY} preset: {preset!r}')
     expanded = {field: PRESETS[preset][field] for field in selected} if preset else {}
     for field, setting in value.items():
-        if field == 'preset' and allow_presets:
-            continue
-        if field not in selected or setting not in FIELD_VALUES[field]:
+        if field == 'preset':
+            if not isinstance(setting, str) or setting not in PRESETS:
+                raise SyncwheelError(f'invalid {label}.{POLICY_KEY} preset: {setting!r}')
+            if allow_presets:
+                continue
+            raise SyncwheelError(f'{label} presets require execution-policy')
+        if field not in FIELD_VALUES or setting not in FIELD_VALUES[field]:
             raise SyncwheelError(f'invalid {label}.{POLICY_KEY} setting: {field}={setting!r}')
-        expanded[field] = setting
+        if field in selected:
+            expanded[field] = setting
     return expanded
 
 
