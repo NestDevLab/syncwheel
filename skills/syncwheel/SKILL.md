@@ -1,9 +1,9 @@
 ---
 name: syncwheel
-description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, stacked PRs, draft stacks, integration branches, and pinned deployment-channel branches, all from a single checkout. Use whenever you are about to create a PR branch, compose a deployment channel, manage a fork/upstream/integration or PR-stack workflow, own a commit before you know which PR it belongs to, rebuild or publish a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
+description: Use Syncwheel for managed stacks, lanes, composition, publication and their recovery. Ordinary Git reads, edits and tests in the assigned source surface do not require this workflow. Explicitly authorized maintenance of Syncwheel and its installation resources uses an independent native Git/forge route without the installed CLI or revision provider.
 allowed-tools: [Bash]
 metadata:
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Syncwheel
@@ -12,6 +12,41 @@ Syncwheel makes Git maintenance **deterministic and safe when many agents touch 
 same repositories**. Branch ownership, PR stacks, and the integration branch are
 described in a manifest; Syncwheel reconciles Git to match it. Follow the
 documented recovery procedure for managed state.
+
+Use native Git for ordinary reads. An explicit maintenance mandate for Syncwheel
+or its installation resources uses an independent native Git/forge checkout,
+without the installed CLI, revision provider or transitive hooks. Preserve the
+managed lanes and follow [native maintenance delivery](references/native-maintenance.md).
+This exception does not change application authority or server rules.
+
+## Optional execution preferences
+
+On versions exposing `execution-policy` (0.50.0 or later), inspect the selected
+scope before changing private preferences:
+
+```sh
+syncwheel self execution-policy status --json
+syncwheel repo execution-policy status --json
+syncwheel worktree execution-policy <lane> status --json
+```
+
+`set --preset disabled|minimal` previews until `--apply`; `clear preset` removes
+the preset and `clear` removes that scope's preferences. Global settings work
+outside a repository. Values inherit global → repository → bound lane, per field.
+Unset configuration retains legacy behavior. Explicit preferences replace private
+legacy integration/CI defaults; forge requirements, published membership, real
+dependencies, ownership, integrity and CAS remain mandatory. Neither preset waits
+for a predecessor or author to become available.
+
+Minimal requires verified targeted-test evidence and independent review of
+sensitive changes. Record existing evidence with
+`repo execution-policy record --receipt FILE --apply --json`; this records an
+operator's verification and runs no test or review. Receipts bind the exact head.
+Installed smoke belongs to release completion, checked separately with
+`repo execution-policy release-status --head SHA --json`, so it is not a circular
+merge prerequisite. See the [execution-policy contract](https://github.com/NestDevLab/syncwheel/blob/main/docs/execution-policy.md)
+for fields, receipt schemas and generation-bound lane overrides. Do not activate
+preferences in another repository as part of maintaining the tool.
 
 ## Ratified working rules (read this first)
 
@@ -86,15 +121,17 @@ Follow these four operating rules before changing a managed repository.
 ### The shared integration branch is staging, not storage
 
 Each session authors in its own lane. Durable work lives on lanes, stack branches, and the remote.
-The shared integration branch only assembles stacks for testing, like a staging environment, so any
-session may refresh it without touching work held in another session's lane or stack.
+The shared integration branch assembles stacks for testing, like a staging environment.
+An explicitly selected integration operation may refresh it while preserving work held
+in another session's lane or stack.
 
 The branch is whatever `manifest.integration.branch` names. That is usually `main-integration`, but
 some repositories name it `main`, and the role is the same: a local `main` declared there is still
 the staging copy. It is not pushed, and delivery still goes through a PR.
 
-When the local integration branch has diverged from the remote branch of the same name, realign it
-without asking. The realignment is local, pushes nothing, rewrites no published history, and keeps a
+Only when an integration operation is explicitly selected, inspect divergence from the
+remote branch of the same name and qualify this local realignment. A scoped delivery
+does not select alignment or replay of the shared integration. The realignment is local, pushes nothing, rewrites no published history, and keeps a
 backup ref, so it is not `destructive_rewrite` and a `human-gated` repository does not reserve it.
 It grants nothing else. If the remote has no branch of that name there is nothing to realign.
 
@@ -149,31 +186,20 @@ repair` is the family of named remedies, always plan-first then `--apply --plan-
 Each backend proves ancestry/tree/ownership before writing and only ever appends
 coordination state — none of them touch the managed branch itself.
 
-## When to use (Syncwheel-first)
+## When to use
 
-**First, detect the regime.** Before branch, worktree, integration, PR, recovery,
-or handoff work in any Git repo, check whether it is Syncwheel-managed: a
-`.syncwheel/` directory or manifest is present, or a workspace/project guide says
-so. When unsure, run `syncwheel status`. If it is managed — or the repo is shared,
-fork/upstream, or touched by multiple agents — it is Syncwheel-first: do not reach
-for manual `git` branch/worktree/integration surgery as the default path.
+Inspect the repository guide and manifest before changing a managed stack, lane,
+composition or publication. Use Syncwheel for those operations and their recovery,
+including declared PR/integration branches, channels and coordinated publication.
 
-Reach for Syncwheel **before** any of these, not after:
+Ordinary reads, edits, commits and tests in the assigned source surface do not
+require a global integration workflow. This does not permit authoring in the
+shared primary, changing a managed ref outside its owner, bypassing Git hooks or
+publishing without the applicable manifest contract. Keep one writer per diff.
+For explicitly authorized tool maintenance, use the native route above.
 
-- editing or handing off work in a Git repository that is shared, managed by
-  Syncwheel, or likely to be touched by multiple agents
-- creating a PR branch or a stack of dependent PRs
-- working in a repo that has a `.syncwheel/` manifest, or a
-  fork/upstream/integration/PR-stack workflow
-- committing on integration before you know which PR owns the change
-- rebuilding or pushing PR branches / integration
-- coordinating with other agents who may rebase the same branches
-
-If the task involves a Git repo that has shared coordination risk, prefer
-Syncwheel even when the visible edit is small. A local file change is not a
-complete handoff by itself: before final response, report the Git state, required
-checks, and the commit/push/PR decision or the explicit reason delivery remains
-local.
+At handoff report the Git state, exact candidate, required checks and actual
+commit/push/PR result, or the concrete reason delivery remains local.
 
 ## The contract
 
