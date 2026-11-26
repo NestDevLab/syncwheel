@@ -21,6 +21,7 @@ from syncwheel_manifest import (
     normalize_derived_provenance,
     normalize_landing_policy,
     validate_stack_dependency_graph,
+    stack_base_owner_id,
 )
 
 COORDINATION_STATE_SCHEMA_VERSION = 2
@@ -626,3 +627,40 @@ def coordination_state_operation_manifest_digest(state):
     if not isinstance(snapshot, dict):
         return None
     return canonical_json_digest(coordination_identity_snapshot(snapshot))
+
+
+def unchanged_foreign_history_scope(remote, composed, requested_stack, *, localized_stacks=None):
+    """Defer only unchanged remote recipes outside the selected dependency closure.
+
+    The caller must bind both snapshots to freshly observed remote state and refs.
+    This is a history-read scope, never permission to omit structural validation.
+    """
+    remote_stacks = stack_snapshot_map(remote)
+    composed_stacks = stack_snapshot_map(composed)
+    localized = localized_stacks if localized_stacks is not None else list(composed_stacks.values())
+    localized_by_id = {stack['id']: stack for stack in localized}
+    required = set()
+    pending = [requested_stack]
+    while pending:
+        stack_id = pending.pop()
+        if stack_id in required:
+            continue
+        required.add(stack_id)
+        stack = localized_by_id.get(stack_id, {})
+        pending.extend(stack.get('depends_on', []))
+        owner = stack_base_owner_id(stack, localized)
+        if owner:
+            pending.append(owner)
+    return sorted(stack_id for stack_id, snapshot in remote_stacks.items()
+                  if stack_id not in required and composed_stacks.get(stack_id) == snapshot)
+
+
+def deferred_history_entry(stack, integration_commits):
+    """Describe a bound foreign recipe without dereferencing any history object."""
+    return {
+        'declared_shas': {item for item in integration_commits
+                          if isinstance(item, str) and re.fullmatch(r'[0-9a-f]{40}', item)},
+        'details': {'id': stack['id'], 'branch': stack['branch'],
+                    'history_validation': 'deferred_remote_unchanged',
+                    'integration_commits': integration_commits},
+    }
