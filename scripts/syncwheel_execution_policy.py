@@ -120,7 +120,8 @@ def candidate_gates(report, profile, head, *, sensitive=True, checks=(), success
         if valid:
             consumed['tests'] = receipt
         else:
-            blockers.append({'code': 'targeted_test_evidence_missing',
+            blockers.append({'code': ('extended_test_evidence_missing' if tests == 'extended'
+                                      else 'targeted_test_evidence_missing'),
                              'detail': 'record successful test evidence for the exact candidate SHA'})
     review = policy['independent_review']
     if review == 'required' or (review == 'sensitive' and sensitive):
@@ -235,3 +236,23 @@ def optional_merge_policy(policy, *, operational):
         result.pop('commit_authors', None)
         result.pop('merge_actors', None)
     return result
+
+
+def candidate_checks(checks, head):
+    """Separate proven other-revision checks; malformed provenance stays blocking.
+
+    The forge observes one PR/composition candidate. This is not a workflow-name
+    allowlist and never discards an unknown revision as if it were unrelated.
+    """
+    relevant, unrelated = [], []
+    for check in checks:
+        revision = check.get('headSha') if isinstance(check, dict) else None
+        proven_other = (isinstance(revision, str)
+                        and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', revision)
+                        and revision != head)
+        (unrelated if proven_other else relevant).append(check)
+    return relevant, unrelated
+
+
+def check_matches_candidate(check, head):
+    return isinstance(check, dict) and check.get('headSha') == head

@@ -3,9 +3,10 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.50.2`
+Current version: `0.51.0`
 
-Operational private `disabled` and `minimal` preferences are available through
+Operational private `disabled`, `minimal`, `standard`, `strict` and per-field
+custom preferences are available through
 [`execution-policy`](docs/execution-policy.md), with candidate evidence separate
 from installed-release smoke.
 

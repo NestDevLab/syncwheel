@@ -1,6 +1,6 @@
 # Optional execution policy
 
-`disabled` and `minimal` are operational private preferences. They never change
+`disabled`, `minimal`, `standard` and `strict` are operational private preferences. They never change
 repository authority, forge requirements, ref ownership, Git locks, registry CAS,
 publication leases, data preservation or destructive-operation proofs. They do
 not authorize bypassing a required forge check or review.
@@ -11,15 +11,24 @@ repository write permission and must satisfy published authority and forge rules
 An unavailable predecessor does not block an authorized writer. Legacy behavior
 remains unchanged when no operational preference is selected.
 
-| Gate | disabled | minimal |
-| --- | --- | --- |
-| Logical lane expiry | Off | Off |
-| Logical writer exclusivity | Off | Warn |
-| Optional CI | None | Required checks only |
-| Integration validation | Advisory | Advisory |
-| Candidate test evidence | Off | Targeted |
-| Independent candidate review | Off | Sensitive changes |
-| Installed package smoke | Off | Required for release completion |
+| Gate | disabled | minimal | standard | strict |
+| --- | --- | --- | --- | --- |
+| Logical lane expiry | Off | Off | Off | Off |
+| Logical writer exclusivity | Off | Warn | Warn | Warn |
+| Optional CI | None | Required checks | All candidate checks | All candidate checks |
+| Integration validation | Advisory | Advisory | Advisory | Required |
+| Candidate test evidence | Off | Targeted | Targeted | Extended |
+| Independent candidate review | Off | Sensitive | All changes | All changes |
+| Installed package smoke | Off | Release completion | Release completion | Release completion |
+
+All candidate checks means checks observed for the PR/composition's exact head,
+not checks belonging to foreign stacks or prior revisions. Proven other-revision
+checks are reported in `outOfScopeChecks`; an unproven revision remains blocking
+under `all`. Required forge checks still need a successful matching candidate
+observation, even when only an old revision has a check with the required name.
+Strict integration validation checks this stack's declared integration commits;
+it does not validate unrelated stack histories. Real dependency absorption and
+published integration membership remain mandatory for every preset.
 
 Unset preferences preserve legacy behavior. Pre-existing clone-local `checks` and `integration` values are private fallbacks,
 not mandatory authority. An explicitly selected operational value replaces them.
@@ -51,10 +60,27 @@ Individual options are `--expiry`, `--writer-exclusivity`, `--checks`,
 `--installation-smoke`. Lane settings remain bound to the current stable lane
 generation. Stale bindings inherit without reactivating old settings; explicit
 `--bind-generation TOKEN` is required to rebind. No owner wait, renewal or lease
-is introduced by either preset. Physical collisions still fail closed.
+is introduced by any preset. Physical collisions still fail closed.
 
-Only `disabled` and `minimal` are offered as CLI presets. The pure resolver's
-other preset definitions are not an operational release promise.
+## Custom preferences
+
+Custom means the existing per-field overrides; there is no `custom` preset or
+new configuration level. An override can refine a preset at the same scope, or
+inherit all unspecified fields from the parent. For example:
+
+```sh
+syncwheel self execution-policy set --preset strict --apply --json
+syncwheel repo execution-policy set --checks required --tests targeted --apply --json
+syncwheel worktree execution-policy example-lane set --independent-review sensitive --apply --json
+syncwheel repo execution-policy clear checks --apply --json
+```
+
+Before the clear, CI and test preferences come from the repository, review from
+the bound lane, and smoke/integration from global Strict. Clearing `checks`
+restores global `all`; status exposes each field's scope and preset/override
+provenance. Explicit overrides may select existing logical expiry/exclusivity
+policies; no preset enables those blocking policies. These commands change only
+the explicitly selected private settings, never another application implicitly.
 
 ## Existing candidate evidence
 
