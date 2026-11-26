@@ -198,11 +198,11 @@ class GithubPrMergeTest(unittest.TestCase):
                 self.assertEqual(blockers, [])
                 self.assertNotIn('integration_not_validated', [item['code'] for item in warnings])
 
-    def test_policy_integration_key_retains_explicit_required_floor(self):
+    def test_policy_integration_key_is_validated_and_omitted_when_required(self):
         policy = self.policy()
         self.assertNotIn('integration', SYNCWHEEL.normalize_github_pr_merge_policy(policy))
         policy['integration'] = 'required'
-        self.assertEqual(SYNCWHEEL.normalize_github_pr_merge_policy(policy)['integration'], 'required')
+        self.assertNotIn('integration', SYNCWHEEL.normalize_github_pr_merge_policy(policy))
         policy['integration'] = 'advisory'
         self.assertEqual(SYNCWHEEL.normalize_github_pr_merge_policy(policy)['integration'], 'advisory')
         policy['integration'] = 'off'

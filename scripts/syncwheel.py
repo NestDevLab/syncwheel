@@ -5461,7 +5461,7 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
         'merge_actors': merge_actors,
         'checks': checks,
     }
-    if 'integration' in value:
+    if integration != 'required':
         normalized['integration'] = integration
     for field, candidate in filters.items():
         if candidate is not None:
@@ -6060,11 +6060,6 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     policy = github_pr_merge_policy_from_profile(local_profile)
     execution_report = execution_policy_report(repo_root)
     operational_preferences = _execution_policy.operational_selected(execution_report)
-    floor = _execution_policy.merge_floor(local_profile)
-    if floor:
-        # Preserve the selected layer provenance while applying independently
-        # declared merge constraints as a mandatory floor.
-        execution_report = _execution_policy.apply_merge_floor(execution_report, floor)
     if policy is None:
         raise SyncwheelError('GitHub PR merge policy is missing or invalid; configure profile.local.json first')
     if not policy['enabled']:
@@ -6072,6 +6067,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     authority, authority_provenance = resolve_repository_authority(repo_root, manifest, manifest_path)
     if authority['mode'] != AUTHORITY_MODE_AI_MANAGED or AUTHORITY_CLASS_SOURCE_CHANGE not in authority['allow']:
         raise SyncwheelError('GitHub PR merge requires authority.mode=ai-managed with source_change allowed')
+    execution_report = _execution_policy.merge_preferences(execution_report, local_profile)
     policy = _execution_policy.optional_merge_policy(policy, operational=operational_preferences)
     selected_preferences = execution_report['effective']
     if selected_preferences['checks'] != 'legacy':
@@ -6203,6 +6199,19 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         )
         blockers.extend(evidence_blockers)
         required_checks = github_required_checks(rules)
+        if required_checks:
+            execution_report = _execution_policy.apply_required_floor(
+                execution_report, {'checks': 'required'}, authority='observed forge status-check rules',
+            )
+            if operational_preferences:
+                policy['checks'] = execution_report['effective']['checks']
+        execution_report['mandatory'] = {
+            'forge_checks': [{'name': name, 'provider': provider} for name, provider in required_checks],
+            'forge_review': github_rule_review_required(rules),
+            'integration_membership': manifest['defaults'].get('integration_membership') == INTEGRATION_MEMBERSHIP_REQUIRED,
+            'sources': {'forge_checks': 'observed forge rules', 'forge_review': 'observed forge rules',
+                        'integration_membership': 'manifest.defaults.integration_membership'},
+        }
         if pr.get('checksIncomplete') is True and (policy['checks'] == 'all' or required_checks):
             github_blocker(blockers, 'checks_observation_incomplete', 'exact-head check history could not be observed')
         if policy['checks'] == 'all':

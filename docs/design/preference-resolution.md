@@ -4,13 +4,13 @@ The pure `syncwheel_policy` module defines one resolution table. The existing
 worktree preference API delegates its two supported fields to that resolver and
 keeps its existing JSON shape, CLI choices and implicit defaults.
 
-The general preset table remains an internal contract. Public worktree commands
-accept only `expiry` and `writer_exclusivity`; they reject a `preset` key rather
-than applying a profile partially. The worktree consumer supports user,
-repository and generation-bound lane overrides for those two fields, described
-in [worktree preferences](../worktree-policy.md). This pure module does not
-persist settings, discover a lane, relax operational delivery gates or migrate
-configuration.
+The public [execution policy](../execution-policy.md) activates `disabled` and
+`minimal` through global, repository and generation-bound lane scopes. The older
+worktree API remains a two-field projection with its original JSON shape and
+field choices. Both consumers share the same resolution table and private
+configuration. The `standard` and `strict` definitions remain an internal
+contract, not an operational CLI promise. This pure module does not persist
+settings, discover a lane or migrate configuration.
 
 ## Explicit presets
 
@@ -60,7 +60,7 @@ Git, authority, ownership, multiwriter and forge checks independently.
 
 ## Consumer qualification
 
-Before exposing profile selection, operational consumers must bind the lane by
+Operational consumers must bind the lane by
 stable identity and generation, obtain the floor from the governing source, and
 wire each supported optional field to its actual gate or documented procedure.
 Prove inheritance and clearing, required-rule enforcement, and that targeted

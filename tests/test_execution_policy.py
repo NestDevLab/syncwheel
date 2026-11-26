@@ -58,6 +58,23 @@ class ExecutionPolicyCliTest(unittest.TestCase):
         self.command('self', 'clear', 'preset', '--apply')
         self.assertEqual(json.loads(self.command('self', 'status').stdout)['effective']['tests'], 'legacy')
 
+    def test_status_reports_private_validation_fallbacks_without_elevating_them_to_floors(self):
+        self.fixture.profile.write_text(json.dumps({'github_pr_merge': {'checks': 'all', 'integration': 'required'}}))
+        selected = json.loads(self.command('repo', 'set', '--preset', 'minimal', '--apply').stdout)
+        self.assertEqual(selected['effective']['checks'], 'required')
+        self.assertEqual(selected['effective']['integration_validation'], 'advisory')
+        self.assertEqual(selected['floor'], {})
+        self.assertEqual(selected['provenance']['checks']['preset'], 'minimal')
+        self.assertEqual(selected['legacy_merge_preferences']['checks'], {
+            'value': 'all', 'source': 'github_pr_merge.checks', 'overridden': True,
+        })
+        legacy = json.loads(self.command('repo', 'clear', '--apply').stdout)
+        self.assertEqual(legacy['effective']['checks'], 'all')
+        self.assertEqual(legacy['effective']['integration_validation'], 'required')
+        self.assertEqual(legacy['sources']['checks'], 'legacy_merge_policy')
+        self.assertFalse(execution.operational_selected(legacy))
+        self.assertTrue(execution.operational_selected(selected))
+
     def test_lane_generation_binding_is_preserved_for_presets(self):
         lane = self.fixture.open_lane()
         self.command('repo', 'set', '--preset', 'minimal', '--apply')
@@ -173,10 +190,10 @@ class ExecutionEvidenceTest(unittest.TestCase):
                     sensitive=execution.sensitive_paths([path]))
                 self.assertIn('independent_review_evidence_missing', [item['code'] for item in blocked])
 
-    def test_merge_floor_keeps_original_provenance_and_disabled_does_not_weaken_it(self):
+    def test_required_forge_floor_keeps_requested_provenance_without_private_authority(self):
         report = resolve_preferences({'worktree_policy': {'preset': 'disabled'}})
-        result = execution.apply_merge_floor(report, {'checks': 'all', 'integration_validation': 'required'})
-        self.assertEqual(result['effective']['checks'], 'all')
+        result = execution.apply_required_floor(report, {'checks': 'required'}, authority='observed forge rules')
+        self.assertEqual(result['effective']['checks'], 'required')
         self.assertEqual(result['provenance']['checks']['requested_provenance']['preset'], 'disabled')
         self.assertEqual(report['effective']['checks'], 'none')
 
@@ -192,12 +209,15 @@ class ExecutionMergeGatesTest(unittest.TestCase):
         self.addCleanup(self.env.stop)
 
     def plan(self, preset, *, mandatory=False, tests=True, review=True, ci=None,
-             decision='APPROVED', permissions=None, historical_authors=False, observed_actor='Yehonal'):
+             decision='APPROVED', permissions=None, historical_authors=False, observed_actor='Yehonal',
+             private_legacy=False):
         fixture = self.fixture
         fixture.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         fixture.manifest_path.write_text(json.dumps(fixture.manifest))
         policy = fixture.policy()
-        policy['checks'] = 'none'
+        policy['checks'] = 'all' if private_legacy else 'none'
+        if private_legacy:
+            policy['integration'] = 'required'
         if historical_authors:
             policy['pr_authors'] = ['previous-writer']
             policy['commit_authors'] = ['previous-writer']
@@ -205,7 +225,10 @@ class ExecutionMergeGatesTest(unittest.TestCase):
         path = fixture.repo / '.syncwheel/profile.local.json'
         profile = json.loads(path.read_text())
         profile['github_pr_merge'] = policy
-        profile['worktree_policy'] = {'preset': preset}
+        if preset is not None:
+            profile['worktree_policy'] = {'preset': preset}
+        else:
+            profile.pop('worktree_policy', None)
         receipts = []
         if tests:
             receipts.append(receipt(fixture.head, 'tests'))
@@ -260,6 +283,48 @@ class ExecutionMergeGatesTest(unittest.TestCase):
                 self.assertIn('merge_actor_permission_missing', [item['code'] for item in blocked['blockers']])
                 unknown = self.plan(preset, historical_authors=True, permissions={'push': True}, observed_actor=None)
                 self.assertIn('merge_actor_unknown', [item['code'] for item in unknown['blockers']])
+
+    def test_opt_in_overrides_private_integration_and_checks_without_weakening_real_dependencies(self):
+        fixture = self.fixture
+        fixture.stale_integration()
+        fixture.manifest['version'] = 3
+        fixture.manifest['coordination'] = SYNCWHEEL.disabled_coordination_config(fixture.manifest_path, 'origin')
+        fixture.git('branch', 'pr/dependency', fixture.base)
+        fixture.manifest['stacks'].insert(0, {
+            'id': 'dependency', 'branch': 'pr/dependency', 'base': 'origin/main',
+            'commits': [], 'state': 'published',
+        })
+        fixture.manifest['stacks'][1]['depends_on'] = ['dependency']
+        fixture.manifest['integration']['stacks'] = ['dependency', 'feature']
+        fixture.manifest = SYNCWHEEL.normalize_manifest_data(fixture.manifest, fixture.manifest_path)
+        optional_failure = [{'name': 'optional-check', 'headSha': fixture.head, 'conclusion': 'FAILURE'}]
+        for preset in ('disabled', 'minimal'):
+            with self.subTest(preset=preset):
+                ready = self.plan(preset, private_legacy=True, ci=optional_failure)
+                self.assertEqual(ready['status'], 'ready', ready['blockers'])
+                self.assertEqual(ready['policy']['integration'], 'advisory')
+                provenance = ready['executionPolicy']
+                self.assertEqual(provenance['sources']['integration_validation'], 'repo')
+                self.assertEqual(provenance['provenance']['integration_validation']['preset'], preset)
+                self.assertEqual(provenance['legacy_merge_preferences']['checks']['value'], 'all')
+                self.assertTrue(provenance['legacy_merge_preferences']['checks']['overridden'])
+                blocked = self.plan(preset, private_legacy=True, mandatory=True, ci=optional_failure)
+                self.assertIn('required_check_missing', [item['code'] for item in blocked['blockers']])
+                self.assertEqual(blocked['executionPolicy']['floor']['checks'], 'required')
+        legacy = self.plan(None, private_legacy=True, ci=optional_failure)
+        codes = [item['code'] for item in legacy['blockers']]
+        self.assertIn('integration_not_validated', codes)
+        self.assertIn('check_failed_or_pending', codes)
+        self.assertEqual(legacy['executionPolicy']['sources']['checks'], 'legacy_merge_policy')
+        fixture.git('branch', '-f', 'pr/dependency', fixture.head)
+        blocked = self.plan('minimal', private_legacy=True, ci=optional_failure)
+        self.assertIn('dependency_not_absorbed', [item['code'] for item in blocked['blockers']])
+        fixture.git('branch', '-f', 'pr/dependency', fixture.base)
+        fixture.manifest['defaults']['integration_membership'] = 'required'
+        fixture.manifest['integration']['stacks'] = ['dependency']
+        membership = self.plan('minimal', private_legacy=True, ci=optional_failure)
+        self.assertIn('integration_membership', [item['code'] for item in membership['blockers']])
+        self.assertTrue(membership['executionPolicy']['mandatory']['integration_membership'])
 
     def test_minimal_missing_targeted_test_evidence_blocks_without_waiting_for_smoke(self):
         blocked = self.plan('minimal', tests=False)

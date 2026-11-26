@@ -226,8 +226,8 @@ def run_policy_command(args, *, settings_path, load_json, write_json,
                   resolve_policy(global_document, proposed, lane_document=selected))
         report['lane_binding'] = binding_report
     if execution and not is_global:
-        from syncwheel_execution_policy import apply_merge_floor, merge_floor
-        report = apply_merge_floor(report, merge_floor(proposed))
+        from syncwheel_execution_policy import merge_preferences
+        report = merge_preferences(report, proposed)
     report.update(scope=args.policy_scope, path=str(path), applied=False)
     if operation != 'status':
         report['proposed'] = proposed

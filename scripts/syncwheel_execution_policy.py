@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from syncwheel_errors import SyncwheelError
-from syncwheel_policy import resolve_preferences
+from syncwheel_policy import FIELD_VALUES, resolve_preferences
 from syncwheel_worktree_policy import lane_document
 
 EVIDENCE_KEY = 'execution_evidence'
@@ -163,8 +163,7 @@ def run_evidence_command(args, *, profile, write_profile, report):
     return 0 if result.get('status') != 'pending' else 1
 
 
-def apply_merge_floor(report, floor):
-    from syncwheel_policy import FIELD_VALUES
+def apply_required_floor(report, floor, *, authority):
     result = copy.deepcopy(report)
     result['floor'] = dict(floor)
     for field, minimum in floor.items():
@@ -173,7 +172,7 @@ def apply_merge_floor(report, floor):
             result['effective'][field] = minimum
             result['sources'][field] = 'floor'
             result['provenance'][field] = {
-                'scope': 'floor', 'kind': 'mandatory', 'authority': 'explicit clone-local merge policy',
+                'scope': 'floor', 'kind': 'mandatory', 'authority': authority,
                 'requested_provenance': result['provenance'][field],
             }
     return result
@@ -192,22 +191,37 @@ def sensitive_paths(paths):
                or not path.endswith(('.md', '.rst', '.txt')) for path in paths)
 
 
-def merge_floor(profile):
-    declared = profile.get('github_pr_merge', {})
+def merge_preferences(report, profile):
+    """Expose private legacy defaults as fallbacks, never mandatory authority."""
+    declared = profile.get('github_pr_merge')
+    if declared is None:
+        return report
     if not isinstance(declared, dict):
         raise SyncwheelError('github_pr_merge must be an object')
-    floor = {}
-    if declared.get('checks') == 'all':
-        floor['checks'] = 'all'
-    if declared.get('integration') == 'required':
-        floor['integration_validation'] = 'required'
-    return floor
+    result = copy.deepcopy(report)
+    previous = {}
+    for field, key, default in (('checks', 'checks', 'all'),
+                                ('integration_validation', 'integration', 'required')):
+        value = declared.get(key, default)
+        if value not in FIELD_VALUES[field]:
+            raise SyncwheelError('invalid legacy merge preference: ' + key)
+        inherited = result['effective'][field] == 'legacy'
+        previous[field] = {'value': value, 'source': 'github_pr_merge.' + key,
+                           'overridden': not inherited}
+        if inherited:
+            result['effective'][field] = value
+            result['sources'][field] = 'legacy_merge_policy'
+            result['provenance'][field] = {
+                'scope': 'repo', 'kind': 'legacy-merge-policy', 'field': key,
+            }
+    result['legacy_merge_preferences'] = previous
+    return result
 
 
 def operational_selected(report):
     from syncwheel_policy import WORKTREE_FIELDS
-    return any(source != 'default' for field, source in report['sources'].items()
-               if field not in WORKTREE_FIELDS)
+    return any(detail.get('kind') in {'preset', 'override'}
+               for field, detail in report['provenance'].items() if field not in WORKTREE_FIELDS)
 
 
 def optional_merge_policy(policy, *, operational):

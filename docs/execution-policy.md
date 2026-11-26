@@ -21,9 +21,12 @@ remains unchanged when no operational preference is selected.
 | Independent candidate review | Off | Sensitive changes |
 | Installed package smoke | Off | Required for release completion |
 
-Unset preferences preserve legacy behavior. Explicit clone-local merge policy
-requirements remain a floor. The merge plan reports both the requested preference
-and its effective mandatory floor; live forge requirements are always checked.
+Unset preferences preserve legacy behavior. Pre-existing clone-local `checks` and `integration` values are private fallbacks,
+not mandatory authority. An explicitly selected operational value replaces them.
+Without opt-in, legacy merge behavior remains unchanged. Status reports each
+field's preference provenance and any overridden legacy fallback; the merge plan
+also reports live forge requirements and their mandatory provenance. Required
+manifest integration membership and real dependency absorption still apply.
 
 ## Activation and inheritance
 
