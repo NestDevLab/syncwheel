@@ -346,6 +346,8 @@ from syncwheel_coordination import (
 )
 
 import syncwheel_cli as _cli
+import syncwheel_worktree_policy as _worktree_policy
+import syncwheel_private_json as _private_json
 from syncwheel_contracts import (
     AUTHORITY_GRANTABLE_CLASSES,
     COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
@@ -822,6 +824,27 @@ def save_json_file(path, data):
     return path
 
 
+def load_private_configuration(path, default):
+    return _private_json.load_document(path, default)
+
+
+def private_json_configuration_lock(path):
+    lock_path = path.with_name('.' + path.name + '.lock')
+    return exclusive_metadata_lock(
+        lock_path, label='private JSON configuration',
+        recovery_log_path=lock_path.with_name(lock_path.name + '-recovery.jsonl'),
+        timeout_seconds=5, stale_seconds=300,
+        busy_error=_private_json.configuration_busy_error,
+    )
+
+
+def save_private_configuration(path, data, *, expected=None):
+    return _private_json.save_document(
+        path, data, expected=expected, lock=private_json_configuration_lock,
+        write_json=lambda destination, value: atomic_write_private_json(destination, value, indent=2),
+    )
+
+
 def parse_int(value, default):
     try:
         return int(value)
@@ -882,14 +905,14 @@ def set_update_mode(mode):
     if mode not in UPDATE_MODES:
         raise SyncwheelError(f'unknown update mode: {mode}')
     path = get_settings_path()
-    data = load_json_file(path, {})
+    data = load_private_configuration(path, {})
     update = data.get('update')
     if update is None or not isinstance(update, dict):
         update = {}
     update['mode'] = mode
     update.setdefault('check_interval_seconds', DEFAULT_UPDATE_INTERVAL_SECONDS)
     data['update'] = update
-    save_json_file(path, data)
+    save_private_configuration(path, data)
     return path
 
 
@@ -5280,14 +5303,10 @@ def repo_profile_path(repo_root):
 
 def load_repo_profile(repo_root):
     path = repo_profile_path(repo_root)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise SyncwheelError(f'invalid syncwheel profile JSON: {path}: {exc}') from exc
-    if not isinstance(data, dict):
-        raise SyncwheelError(f'syncwheel profile must be an object: {path}')
+    data = _private_json.load_document(
+        path, {}, invalid_label='invalid syncwheel profile JSON',
+        root_label='syncwheel profile must be an object',
+    )
     personal = data.get('personal')
     if personal is not None:
         if not isinstance(personal, str) or not personal.strip():
@@ -5307,8 +5326,38 @@ def checked_repo_profile_path(repo_root):
     return path
 
 
-def save_repo_profile(repo_root, profile):
-    return atomic_write_private_json(checked_repo_profile_path(repo_root), profile, indent=2)
+def save_repo_profile(repo_root, profile, *, expected=None):
+    return save_private_configuration(checked_repo_profile_path(repo_root), profile, expected=expected)
+
+
+def worktree_policy_root(repo_root):
+    worktrees = get_worktrees(repo_root)
+    return Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root).resolve()
+
+
+def effective_worktree_policy(repo_root):
+    return _worktree_policy.resolve_policy(
+        load_json_file(get_settings_path(), {}),
+        load_repo_profile(worktree_policy_root(repo_root)),
+    )['effective']
+
+
+def command_worktree_policy(args):
+    options = {}
+    if args.policy_scope == 'repo':
+        root = worktree_policy_root(resolve_repo_root(args.repo))
+        path = checked_repo_profile_path(root)
+        if args.policy_action != 'status' and (git_path_is_tracked(root, path) or git(
+            root, 'check-ignore', '--quiet', '--no-index', '--',
+            '.syncwheel/profile.local.json', check=False,
+        ).returncode != 0):
+            raise SyncwheelError('worktree policy profile must be ignored and untracked')
+        options = dict(profile_path=path, load_profile=lambda: load_repo_profile(root),
+                       write_profile=lambda value: save_repo_profile(root, value))
+    return _worktree_policy.run_policy_command(
+        args, settings_path=get_settings_path(), load_json=load_private_configuration,
+        write_json=save_private_configuration, **options,
+    )
 
 
 def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
@@ -5462,7 +5511,7 @@ def ensure_github_pr_merge_policy_is_private(repo_root):
 def github_pr_merge_policy_edit(repo_root, proposed, *, apply, clear=False, json_mode=False):
     ensure_github_pr_merge_policy_is_private(repo_root)
     current_profile = load_repo_profile(repo_root)
-    next_profile = dict(current_profile)
+    next_profile = copy.deepcopy(current_profile)
     if clear:
         next_profile.pop(GITHUB_PR_MERGE_POLICY_KEY, None)
     else:
@@ -7042,7 +7091,7 @@ def coordination_profile(repo_root):
 
 def installation_id(create=False):
     path = get_settings_path()
-    data = load_json_file(path, {})
+    data = load_private_configuration(path, {})
     identity = data.get('installation')
     if identity is None:
         identity = {}
@@ -7058,7 +7107,7 @@ def installation_id(create=False):
     value = str(uuid.uuid4())
     identity['id'] = value
     data['installation'] = identity
-    save_json_file(path, data)
+    save_private_configuration(path, data)
     return value
 
 
@@ -12143,6 +12192,11 @@ def command_worktree_open(args):
             )
         persist = governed_worktree_registry_cas_persister(repo_root, registry)
         warnings = governed_worktree_warning_lines(repo_root, manifest)
+        if stack:
+            _worktree_policy.admit_writers(
+                [item for item in registry['lanes'] if item.get('target') == stack['id']],
+                governed_worktree_owner(), effective_worktree_policy(repo_root),
+            )
         active = [
             item for item in registry['lanes']
             if item['state'] in {'active', 'captured_pending_cleanup'}
@@ -12745,9 +12799,9 @@ def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id, manifest
 def command_use(args):
     repo_root = resolve_repo_root(args.repo)
     if args.shared:
-        path = repo_profile_path(repo_root)
-        if path.exists():
-            path.unlink()
+        profile = load_repo_profile(repo_root)
+        profile.pop('personal', None)
+        save_repo_profile(repo_root, profile)
         print('using shared manifest')
         return 0
     if not args.personal:
@@ -19964,6 +20018,13 @@ def command_hooks_worktree_guard(args):
     primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
     current_path = Path(git(repo_root, 'rev-parse', '--show-toplevel').stdout.strip()).resolve()
     if current_path != primary_root:
+        if args.event == 'pre-commit':
+            registry, _ = load_governed_worktree_registry(repo_root)
+            _worktree_policy.admit_writers(
+                [lane for lane in registry['lanes']
+                 if Path(lane['path']).resolve() == current_path],
+                governed_worktree_owner(), effective_worktree_policy(repo_root),
+            )
         return 0
     guard, guard_error = inspect_primary_guard(repo_root)
     branch = get_current_branch(primary_root)
@@ -20764,22 +20825,18 @@ def governed_worktree_preflight(args):
         return
     if scoped_stacks:
         registry, _ = load_governed_worktree_registry(repo_root)
-        blockers = [
-            lane for lane in registry['lanes']
-            if lane.get('target') in scoped_stacks and lane.get('state') != 'reaped'
-            # Intact lane whose tip is in a local recovery ref; only its remote
-            # save is pending, which never blocks the stack.
-            and lane.get('pending_reason') != 'archive_push_failed'
-        ]
+        health = {
+            lane['id']: lane
+            for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
+            if lane.get('id')
+        }
+        blockers = _worktree_policy.scoped_recovery_blockers(
+            [lane for lane in registry['lanes'] if lane.get('target') in scoped_stacks],
+            health, effective_worktree_policy(repo_root), governed_worktree_owner(),
+        )
         if blockers:
             # Name each lane's health and remedy: the warnings above may have
             # been collapsed into a summary line on a busy repository.
-            health = {
-                lane['id']: lane
-                for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
-                if lane.get('id')
-            }
-
             def describe(lane):
                 found = health.get(lane['id']) or {}
                 code = found.get('code') or lane.get('pending_reason') or lane.get('state')
@@ -21172,6 +21229,10 @@ def main():
         or (desk_release and not args.apply)
     )
     try:
+        if args.func == command_worktree_policy:
+            # Private preferences own no refs or lanes and must be configurable
+            # outside a repository, or while an existing lane needs recovery.
+            return command_worktree_policy(args)
         if args.func in {command_stack_sync, command_stack_absorb}:
             adopted_metadata = True
             observation = _READONLY_DIAGNOSTICS.set(True)
@@ -21382,6 +21443,7 @@ def command_handlers():
         'command_publish': command_publish,
         'command_reconcile': command_reconcile,
         'command_replay_mode': command_replay_mode,
+        'command_worktree_policy': command_worktree_policy,
         'command_repo_add': command_repo_add,
         'command_repo_authority_set': command_repo_authority_set,
         'command_repo_authority_status': command_repo_authority_status,
@@ -21582,6 +21644,9 @@ class _GovernedWorktreeRepository:
 
     def coordination_publication_lock_path(self, *args, **kwargs):
         return coordination_publication_lock_path(*args, **kwargs)
+
+    def effective_worktree_policy(self, repo_root):
+        return effective_worktree_policy(repo_root)
 
     def governed_lane_remedy(self, *args, **kwargs):
         return governed_lane_remedy(*args, **kwargs)

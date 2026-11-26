@@ -6294,12 +6294,16 @@ with module.coordination_publication_lock(Path(repo_path)):
                 ],
             },
         }
-        module.save_repo_profile(repo, {'coordination': {'locks': {'stale': {'created_at': old}}}})
+        profile = module.load_repo_profile(repo)
+        profile['coordination'] = {'locks': {'stale': {'created_at': old}}}
+        module.save_repo_profile(repo, profile)
         locked = module.coordination_gc_plan(repo, manifest, fetch=False, state_info=state_info)
         self.assertEqual(locked['candidates'], [])
         self.assertTrue(any('lock' in item for item in locked['skipped']))
 
-        module.save_repo_profile(repo, {'coordination': {}})
+        profile = module.load_repo_profile(repo)
+        profile['coordination'] = {}
+        module.save_repo_profile(repo, profile)
         ready = module.coordination_gc_plan(repo, manifest, fetch=False, state_info=state_info)
         self.assertEqual([item['type'] for item in ready['candidates']], ['remove_worktree', 'delete_branch'])
 
@@ -6310,7 +6314,9 @@ with module.coordination_publication_lock(Path(repo_path)):
             result = original_plan(*args, **kwargs)
             calls['count'] += 1
             if calls['count'] == 1:
-                module.save_repo_profile(repo, {'coordination': {'locks': {'stale': {'created_at': old}}}})
+                profile = module.load_repo_profile(repo)
+                profile['coordination'] = {'locks': {'stale': {'created_at': old}}}
+                module.save_repo_profile(repo, profile)
             return result
 
         with mock.patch.object(module, 'coordination_gc_plan', side_effect=add_lock_after_initial_plan):
@@ -6318,7 +6324,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertTrue(worktree.exists())
         self.assertTrue(any('no longer eligible' in item for item in raced['skipped']))
 
-        module.save_repo_profile(repo, {'coordination': {}})
+        profile = module.load_repo_profile(repo)
+        profile['coordination'] = {}
+        module.save_repo_profile(repo, profile)
         module.run_coordination_gc(repo, manifest, apply=True, fetch=False, state_info=state_info)
         self.assertFalse(worktree.exists())
         self.assertNotEqual(self.git(repo, 'show-ref', '--verify', '--quiet', 'refs/heads/pr/stale', expected=1).returncode, 0)
