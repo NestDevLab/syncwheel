@@ -5067,40 +5067,7 @@ def latest_channel_event(repo_root, manifest_path, channel_id, event_type):
 
 
 def materialize_channel_tip(repo_root, channel, plan):
-    if find_worktree_for_branch(repo_root, channel['branch']):
-        raise SyncwheelError(
-            f"channel branch {channel['branch']!r} is checked out; close its worktree before apply"
-        )
-    resolution = channel.get('resolution')
-    if resolution:
-        return resolution['revision']
-    temporary_branch = f"syncwheel/channel-build/{plan['planDigest'][:24]}"
-    temporary_ref = f'refs/heads/{temporary_branch}'
-    if ref_tip(repo_root, temporary_ref):
-        raise SyncwheelError(f'temporary channel build ref already exists: {temporary_ref}')
-    commits = [
-        commit
-        for entry in channel.get('composition', [])
-        for commit in entry.get('commits', [])
-    ]
-    synthetic = {
-        'id': f"channel-{channel['id']}",
-        'branch': temporary_branch,
-        'base': channel['baseRevision'],
-        'commits': commits,
-    }
-    mode = 'plumbing' if git_supports_write_tree(repo_root) else 'ephemeral'
-    replay = replay_plan(repo_root, None, replay_target(stack=synthetic), mode)
-    try:
-        with open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink):
-            result = execute_replay(repo_root, replay, True)
-        require_replay_success(result)
-        tip = result['after_tip']
-        if not tip:
-            raise SyncwheelError('channel materialization did not produce a commit')
-        return tip
-    finally:
-        git(repo_root, 'update-ref', '-d', temporary_ref, check=False)
+    return _replay_engine(repo_root).materialize_channel_tip(channel, plan)
 
 
 def channel_receipt(channel, plan, status, tip=None, published_revision=None, coordination_state=None):

@@ -1527,7 +1527,7 @@ runpy.run_path(str(cli), run_name='__main__')
             repo=str(self.repo), manifest=None, personal=None, channel='dev',
             apply=True, plan_digest=plan['planDigest'],
         )
-        with mock.patch.object(module, 'git_supports_write_tree', return_value=False):
+        with mock.patch.object(module.ReplayEngine, 'git_supports_write_tree', return_value=False):
             module.command_channel_apply(args)
         self.assertTrue(self.git('rev-parse', '--verify', 'channel/dev'))
         self.assertNotIn('syncwheel-replay-', self.git('worktree', 'list', '--porcelain'))

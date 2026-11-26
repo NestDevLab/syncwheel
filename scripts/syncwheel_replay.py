@@ -5,6 +5,7 @@ explicit ports. No replay operation reaches into the CLI namespace.
 """
 
 import datetime
+import os
 from pathlib import Path
 import re
 import shlex
@@ -965,6 +966,45 @@ class ReplayEngine:
                 finally:
                     self.repository.git(repo_root, 'worktree', 'remove', '--force', worktree, check=False)
         return self.execute_replay_steps(plan)
+
+    def materialize_channel_tip(self, channel, plan):
+        """Replay exact pins, excluding only ancestry already in the pinned base."""
+        repo_root = self.repository.root
+        if self.repository.find_worktree_for_branch(repo_root, channel['branch']):
+            raise SyncwheelError(
+                f"channel branch {channel['branch']!r} is checked out; close its worktree before apply"
+            )
+        resolution = channel.get('resolution')
+        if resolution:
+            return resolution['revision']
+        temporary_branch = f"syncwheel/channel-build/{plan['planDigest'][:24]}"
+        temporary_ref = f'refs/heads/{temporary_branch}'
+        if self.repository.ref_tip(repo_root, temporary_ref):
+            raise SyncwheelError(f'temporary channel build ref already exists: {temporary_ref}')
+        commits = [
+            commit
+            for entry in channel.get('composition', [])
+            for commit in entry.get('commits', [])
+            if not self.repository.branch_contains(repo_root, channel['baseRevision'], commit)
+        ]
+        synthetic = {
+            'id': f"channel-{channel['id']}",
+            'branch': temporary_branch,
+            'base': channel['baseRevision'],
+            'commits': commits,
+        }
+        mode = 'plumbing' if self.git_supports_write_tree() else 'ephemeral'
+        replay = self.replay_plan(None, replay_target(stack=synthetic), mode)
+        try:
+            with open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink):
+                result = self.execute_replay(replay, True)
+            require_replay_success(result)
+            tip = result['after_tip']
+            if not tip:
+                raise SyncwheelError('channel materialization did not produce a commit')
+            return tip
+        finally:
+            self.repository.git(repo_root, 'update-ref', '-d', temporary_ref, check=False)
 
     def materialize_stack_projection(self, stack):
         repo_root = self.repository.root

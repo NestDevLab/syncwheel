@@ -17,23 +17,23 @@ source, not a substitute for a recorded run on the accepted revision.
 
 | Case | Required behavior | Evidence seam / remaining qualification |
 |---|---|---|
-| 1 | Draft → ready does not select a staging composition | `channels.test_state_only_stack_promote_keeps_pinned_channel_valid`; verify selected composition/ref unchanged. |
+| 1 | Draft → ready does not select a staging composition | `test_composition_acceptance.py` promotes draft A without changing the selected D+E recipe or tip; A remains absent from its tree. |
 | 2 | Nine problematic foreign stacks do not block an independent target | `test_selective_history_scope.py`, `test_selective_ref_scope.py`, coordination missing-foreign CLI cases; scope is compose v2. |
 | 3 | Lost author immediately or after twenty minutes creates no artificial wait | `test_execution_policy.py` authorized-writer case; explicit time/availability matrix remains. |
 | 4 | No transcript is needed; local work survives | `test_published_recipe_fresh_clone.py`; add explicit absent-transcript assertion. |
-| 5 | Returning author sees preserved work | Foreign-lane preservation is covered; returning-author continuation remains. |
+| 5 | Returning author sees preserved work | `test_returning_author.py`: after A/B publish, C commits its original staged bytes; unstaged/untracked/ignored data, symlink, registry ownership and all remote refs remain intact. |
 | 6 | Valid unwanted H is not selected | `test_composition_acceptance.py` unwanted/broken-source case. |
 | 7 | Broken ready I does not block independent work or become implicitly green | Same test: independent composition omits I; selecting I still fails its actual syntax check. |
 | 8 | Incompatible E/F can be qualified separately | `test_composition_acceptance.py` conflicting-choices case; separate channel tips contain their exact alternative. |
 | 9 | Explicit required E+F fails on their conflict | Same case; native replay refuses the required union. |
 | 10 | Removing E does not reuse its old green proof | Same case; recipe digest changes, old tip remains until a separate apply. Behavioral-test receipts remain separate. |
 | 11 | Last valid composition survives a failed attempt | Same case; failed union preserves both previously valid channel refs. |
-| 12 | Broken G blocks J, not independent work | `channels.test_dependency_closure_and_order_are_fail_closed`; add the explicit G/J versus D split. |
-| 13 | Delivered G permits J on a new base after reevaluation | Explicit absorbed-prerequisite/new-base scenario remains. |
-| 14 | Abandoning G cannot cosmetically erase J's dependency | `channels.test_stack_close_refuses_dependents_without_side_effects`; verify explicit G/J instance. |
+| 12 | Broken G blocks J, not independent work | `test_composition_acceptance.py` broken-prerequisite case: omitted G refuses, selected broken G fails its check, independent D succeeds. |
+| 13 | Delivered G permits J on a new base after reevaluation | Integrated-prerequisite case pins a delivered G as the new base and materializes G+J without replaying base ancestry. Both plumbing and fallback agree; a non-ancestor with the same patch still refuses, and raw pins/dependency declarations stay unchanged. |
+| 14 | Abandoning G cannot cosmetically erase J's dependency | Same broken-prerequisite case: after closing the channel, close G still refuses because J depends on it, preserving J's declaration. |
 | 15 | New SHA invalidates pertinent evidence | `channels.test_pins_are_immutable_until_explicit_refresh` plus exact-head execution evidence. |
 | 16 | New base reevaluates pertinent evidence | `channels.test_base_is_pinned_until_refresh_deliberately_repins_it`; behavioral evidence on refreshed base remains. |
-| 17 | A hidden dependency is detected | Explicit `depends_on` and base-owner closure exist; undeclared semantic dependency must be exercised by an actual check. No universal inference is claimed. |
+| 17 | A hidden dependency is detected | Hidden-import case runs an actual isolated Python check: D alone fails its import; an explicit A+D recipe passes. The old active recipe must be closed before changing its declared dependency; its retained ref stays unchanged. No universal inference is claimed. |
 | 18 | Independent CAS operations serialize safely | Fresh-clone contention/retry fixture plus channel manifest-lock/CAS tests; no simultaneous-success promise for one shared state ref. |
 | 19 | Real ref/claim collision still refuses | Channel create ownership/collision tests and coordination required-scope/claim guards. |
 | 20 | Crash before push / after remote success before receipt recovers safely | Coordination promote pre-push and selective-compose post-push SIGKILL cases; channel receipt reconciliation tests. |
