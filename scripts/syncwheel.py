@@ -5981,6 +5981,7 @@ def github_pr_merge_plan_digest(plan):
     unsigned.pop('planDigest', None)
     unsigned.pop('operationId', None)
     unsigned.pop('supersededChecks', None)
+    unsigned.pop('outOfScopeChecks', None)
     return canonical_json_digest(unsigned)
 
 

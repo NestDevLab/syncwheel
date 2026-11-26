@@ -134,6 +134,11 @@ class CompleteProfileMergeTest(unittest.TestCase):
                 ])
                 self.assertEqual(result['status'], 'ready', result['blockers'])
                 self.assertEqual(result['outOfScopeChecks'][0]['name'], 'foreign-stack-ci')
+                unrelated_changed = self.fixture.plan(preset, review_scope='all', test_scope='extended', ci=[
+                    {'name': 'candidate-ci', 'headSha': head, 'conclusion': 'SUCCESS'},
+                    {'name': 'foreign-stack-ci', 'headSha': self.fixture.fixture.base, 'conclusion': 'PENDING'},
+                ])
+                self.assertEqual(unrelated_changed['planDigest'], result['planDigest'])
                 unknown = self.fixture.plan(preset, review_scope='all', test_scope='extended', ci=[
                     {'name': 'unknown-ci', 'conclusion': 'SUCCESS'},
                 ])
