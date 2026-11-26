@@ -9,36 +9,24 @@ import json
 import sys
 
 from syncwheel_errors import SyncwheelError
+from syncwheel_policy import (
+    POLICY_KEY, WORKTREE_FIELDS, FIELD_VALUES, DEFAULT_PREFERENCES,
+    configuration_values, resolve_preferences,
+)
 
 
-POLICY_KEY = 'worktree_policy'
-POLICY_VALUES = {
-    'expiry': ('enforced', 'off'),
-    'writer_exclusivity': ('block', 'warn', 'off'),
-}
-DEFAULT_POLICY = {'expiry': 'enforced', 'writer_exclusivity': 'legacy'}
+POLICY_VALUES = {field: tuple(reversed(FIELD_VALUES[field])) for field in WORKTREE_FIELDS}
+DEFAULT_POLICY = {field: DEFAULT_PREFERENCES[field] for field in WORKTREE_FIELDS}
 
 
 def policy_values(document, label):
-    value = document.get(POLICY_KEY, {})
-    if not isinstance(value, dict):
-        raise SyncwheelError(f'{label}.{POLICY_KEY} must be an object')
-    for key, setting in value.items():
-        if key not in POLICY_VALUES or setting not in POLICY_VALUES[key]:
-            raise SyncwheelError(f'invalid {label}.{POLICY_KEY} setting: {key}={setting!r}')
-    return dict(value)
+    return configuration_values(document, label, fields=WORKTREE_FIELDS, allow_presets=False)
 
 
 def resolve_policy(global_document, repo_document=None):
-    global_values = policy_values(global_document, 'settings')
-    repo_values = policy_values(repo_document or {}, 'profile')
-    effective = dict(DEFAULT_POLICY)
-    sources = dict.fromkeys(DEFAULT_POLICY, 'default')
-    for source, values in (('global', global_values), ('repo', repo_values)):
-        effective.update(values)
-        sources.update(dict.fromkeys(values, source))
-    return {'effective': effective, 'sources': sources,
-            'global': global_values, 'repo': repo_values}
+    report = resolve_preferences(global_document, repo_document, fields=WORKTREE_FIELDS,
+                                 allow_presets=False)
+    return {key: report[key] for key in ('effective', 'sources', 'global', 'repo')}
 
 
 def edit_policy(document, *, values=None, clear=()):

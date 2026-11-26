@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.48.1 - 2026-11-26
+
+- Extract a shared preference-resolution contract with explicit preset, layered override, provenance and mandatory-floor semantics. Keep public worktree settings and legacy behavior unchanged; operational profile selection remains unavailable until its consumers are qualified.
+
 ## 0.48.0 - 2026-11-25
 
 - Add independent user defaults and private repository overrides for worktree lease expiry and logical writer admission, with previewed CLI updates and per-field inheritance. Preserve legacy behavior when unset, existing lane records, and physical Git, registry, publication and cleanup protections.
