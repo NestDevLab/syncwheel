@@ -1,12 +1,15 @@
 # Syncwheel For AI Agents
 
-Use Syncwheel for deterministic Git maintenance in repositories with PR stacks,
-integration branches, pinned deployment channels, dedicated worktrees, forks,
-or more than one human/agent touching branches.
+Use Syncwheel for managed stacks, lanes, composition and publication. Ordinary
+Git reads, edits, commits and tests in the assigned source surface do not require
+a global integration workflow; preserve shared-primary and managed-ref rules. For explicitly authorized
+maintenance of Syncwheel or its installation resources, follow
+[native maintenance delivery](docs/native-maintenance.md) from an independent
+checkout without invoking the installed CLI or its revision provider.
 
 ## First Checks
 
-Run these before branch, worktree, push, PR, recovery, or final handoff work:
+Run these before managed stack, lane, composition, publication or recovery work:
 
 ```bash
 syncwheel repo tracking status
