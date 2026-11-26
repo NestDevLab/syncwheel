@@ -6057,6 +6057,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     local_profile = load_repo_profile(repo_root)
     policy = github_pr_merge_policy_from_profile(local_profile)
     execution_report = execution_policy_report(repo_root)
+    operational_preferences = _execution_policy.operational_selected(execution_report)
     floor = _execution_policy.merge_floor(local_profile)
     if floor:
         # Preserve the selected layer provenance while applying independently
@@ -6069,7 +6070,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     authority, authority_provenance = resolve_repository_authority(repo_root, manifest, manifest_path)
     if authority['mode'] != AUTHORITY_MODE_AI_MANAGED or AUTHORITY_CLASS_SOURCE_CHANGE not in authority['allow']:
         raise SyncwheelError('GitHub PR merge requires authority.mode=ai-managed with source_change allowed')
-    policy = dict(policy)
+    policy = _execution_policy.optional_merge_policy(policy, operational=operational_preferences)
     selected_preferences = execution_report['effective']
     if selected_preferences['checks'] != 'legacy':
         policy['checks'] = selected_preferences['checks']
@@ -6129,8 +6130,15 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     if not isinstance(actor, str) or actor.casefold() not in {item.casefold() for item in policy['merge_actors']}:
         github_blocker(blockers, 'merge_actor_not_allowed', 'effective gh actor is not allowlisted', actor=actor)
     permissions = repository_info.get('permissions') if isinstance(repository_info, dict) else {}
-    if not isinstance(permissions, dict) or permissions.get('admin') is not True:
-        github_blocker(blockers, 'merge_actor_not_admin', 'effective gh actor has no repository admin permission')
+    permitted = isinstance(permissions, dict) and (
+        permissions.get('admin') is True or (operational_preferences and any(
+            permissions.get(field) is True for field in ('push', 'maintain')
+        ))
+    )
+    if not permitted:
+        github_blocker(blockers, 'merge_actor_permission_missing' if operational_preferences else 'merge_actor_not_admin',
+                       'effective gh actor has no verified repository write permission' if operational_preferences else
+                       'effective gh actor has no repository admin permission')
     checks, superseded_checks = [], []
     if isinstance(pr, dict):
         if pr_number is not None and pr.get('number') != int(pr_number):
@@ -6314,6 +6322,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'adapterRequest': request,
         'policy': policy,
         'executionPolicy': execution_report,
+        'operationalPreferencesActive': operational_preferences,
         'candidateEvidence': candidate_evidence if isinstance(pr, dict) else {},
         'releaseEvidence': _execution_policy.release_status(execution_report, load_repo_profile(worktree_policy_root(repo_root)), source_revision),
         'authority': authority,

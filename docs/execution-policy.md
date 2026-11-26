@@ -88,8 +88,7 @@ Use `source: "ci"` for an existing CI test job and its exact check name in
 `reference`. The merge planner also requires a live `SUCCESS` for that check on
 the same candidate SHA; `SKIPPED`, a prior head or a missing observation does not
 satisfy targeted tests. Internal test and review receipts retain their verified
-references without imposing a new check name or a GitHub approver. Non-document
-changes are conservatively sensitive. A conflicting receipt for the same head
+references without imposing a new check name or a GitHub approver. Non-document changes and role/skill instruction files are conservatively sensitive. A conflicting receipt for the same head
 and kind fails without overwriting the original. Private writes retain exact-byte
 CAS and unrelated configuration.
 

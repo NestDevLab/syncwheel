@@ -180,9 +180,10 @@ def apply_merge_floor(report, floor):
 
 
 def sensitive_paths(paths):
-    # Documentation-only changes may omit optional sensitive review. Unknown
-    # files, build/configuration and executable code all require it by default.
-    return any(not (path.endswith(('.md', '.rst', '.txt')))
+    # Instructions and unknown files are sensitive. Ordinary documentation-only
+    # changes may omit the optional sensitive review.
+    instruction_names = {'AGENT.md', 'AGENTS.md', 'SKILL.md'}
+    return any(Path(path).name in instruction_names or not path.endswith(('.md', '.rst', '.txt'))
                for path in paths)
 
 
@@ -196,3 +197,21 @@ def merge_floor(profile):
     if declared.get('integration') == 'required':
         floor['integration_validation'] = 'required'
     return floor
+
+
+def operational_selected(report):
+    from syncwheel_policy import WORKTREE_FIELDS
+    return any(source != 'default' for field, source in report['sources'].items()
+               if field not in WORKTREE_FIELDS)
+
+
+def optional_merge_policy(policy, *, operational):
+    result = copy.deepcopy(policy)
+    if operational:
+        # These private historical filters are not repository/forge authority.
+        # Live principal permissions, repo identity and required rules remain
+        # with the merge owner and cannot be supplied by a local receipt.
+        result['allowed_bypasses'] = []
+        result.pop('pr_authors', None)
+        result.pop('commit_authors', None)
+    return result

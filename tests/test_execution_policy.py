@@ -173,12 +173,16 @@ class ExecutionMergeGatesTest(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def plan(self, preset, *, mandatory=False, tests=True, review=True, ci=None):
+    def plan(self, preset, *, mandatory=False, tests=True, review=True, ci=None,
+             decision='APPROVED', permissions=None, historical_authors=False):
         fixture = self.fixture
         fixture.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         fixture.manifest_path.write_text(json.dumps(fixture.manifest))
         policy = fixture.policy()
         policy['checks'] = 'none'
+        if historical_authors:
+            policy['pr_authors'] = ['previous-writer']
+            policy['commit_authors'] = ['previous-writer']
         path = fixture.repo / '.syncwheel/profile.local.json'
         profile = json.loads(path.read_text())
         profile['github_pr_merge'] = policy
@@ -190,7 +194,9 @@ class ExecutionMergeGatesTest(unittest.TestCase):
             receipts.append(receipt(fixture.head, 'review'))
         profile = execution.record_receipts(profile, receipts)
         path.write_text(json.dumps(profile))
-        observation = fixture.observation(decision='APPROVED', checks=ci or [])
+        observation = fixture.observation(decision=decision, checks=ci or [])
+        if permissions is not None:
+            observation['repositoryInfo']['permissions'] = permissions
         observation['pr']['mergeStateStatus'] = 'CLEAN'
         if mandatory:
             observation['rules']['branchProtection']['required_status_checks'] = {'contexts': ['mandatory-ci']}
@@ -214,6 +220,24 @@ class ExecutionMergeGatesTest(unittest.TestCase):
         # Fixture feature.txt is documentation-like; executable changes below
         # exercise sensitive review independently of GitHub's approval state.
         self.assertEqual(ready['releaseEvidence']['status'], 'pending')
+
+    def test_operational_presets_never_inherit_legacy_forge_review_bypass(self):
+        for preset in ('disabled', 'minimal'):
+            with self.subTest(preset=preset):
+                blocked = self.plan(preset, decision='REVIEW_REQUIRED')
+                self.assertIn('required_reviews_not_authorized', [item['code'] for item in blocked['blockers']])
+                self.assertEqual(blocked['path'], 'normal')
+                self.assertNotIn('--admin', blocked['command'] or [])
+                self.assertEqual(blocked['policy']['allowed_bypasses'], [])
+
+    def test_authorized_writer_does_not_wait_for_historical_author_but_needs_real_permission(self):
+        for preset in ('disabled', 'minimal'):
+            with self.subTest(preset=preset):
+                ready = self.plan(preset, historical_authors=True, permissions={'push': True, 'admin': False})
+                self.assertEqual(ready['status'], 'ready', ready['blockers'])
+                self.assertNotIn('--admin', ready['command'])
+                blocked = self.plan(preset, historical_authors=True, permissions={'pull': True})
+                self.assertIn('merge_actor_permission_missing', [item['code'] for item in blocked['blockers']])
 
     def test_minimal_missing_targeted_test_evidence_blocks_without_waiting_for_smoke(self):
         blocked = self.plan('minimal', tests=False)
