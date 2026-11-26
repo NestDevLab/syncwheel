@@ -22,9 +22,22 @@ class PublishedRecipeFreshCloneTest(unittest.TestCase):
             home, config, template = root / 'home', root / 'config', root / 'empty-template'
             for path in (home, config, template):
                 path.mkdir()
+            # Guards resolve a stable CLI outside the authored lanes. Materialize
+            # the candidate here instead of depending on an installed host CLI.
+            stable = root / 'stable-cli'
+            scripts = Path(__file__).resolve().parents[1] / 'scripts'
+            shutil.copytree(scripts, stable,
+                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+            shutil.copy2(scripts.parent / 'VERSION', stable / 'VERSION')
+            wrapper = stable / 'syncwheel'
+            wrapper.write_text('#!' + sys.executable + '\n'
+                               'from syncwheel import main\n'
+                               'raise SystemExit(main())\n')
+            wrapper.chmod(0o755)
             inherited = {k: v for k, v in os.environ.items()
                          if not k.startswith('GIT_') and not k.startswith('SYNCWHEEL_')}
             env = dict(inherited, HOME=str(home), XDG_CONFIG_HOME=str(config),
+                       PATH=str(stable) + os.pathsep + inherited.get('PATH', os.defpath),
                        GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                        GIT_TEMPLATE_DIR=str(template),
                        SYNCWHEEL_UPDATE_MODE='off', GIT_ALLOW_PROTOCOL='file',
