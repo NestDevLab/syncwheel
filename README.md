@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.50.0`
+Current version: `0.50.1`
 
 Operational private `disabled` and `minimal` preferences are available through
 [`execution-policy`](docs/execution-policy.md), with candidate evidence separate

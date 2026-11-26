@@ -137,3 +137,39 @@ This increment does not yet permit missing or drifted managed remote refs, and
 does not change version 3 composition or merge-policy integration requirements.
 Use the existing exact plan file with `coordination compose --apply --plan-file`.
 No global integration rebuild is required by this selective compose operation.
+
+## Scoped ref validation in version 0.50.1
+
+Version 2 `coordination compose --stack <id>` now binds a
+`refValidationScope` to the same reviewed plan and publication. The selected
+source, its claim, the canonical state and real dependency closure remain
+mandatory. Dependencies include explicit declarations and legacy base-owner
+relationships resolved on the complete localized manifest.
+
+| Resource | Required evidence | Effect |
+| --- | --- | --- |
+| Selected source and claim | Exact observed tips and ownership | Atomic publication with the state CAS |
+| True dependency refs/history | Exact accepted bindings and available input history | Missing or changed dependencies refuse |
+| Unchanged foreign stack | Exact snapshot identity in accepted state | Preserve recipe, recorded tip and claim; no writes |
+| Unrelated current foreign ref | Diagnostic observation | Missing/diverged is not alignment proof or a target lease |
+| Historical integration anchor | Available object and verified control-manifest digest | Preserve recorded anchor; never bootstrap or publish integration |
+| Local control write target | Available exact HEAD, clean primary and manifest/head CAS | Native control-metadata persistence only |
+
+The plan and receipt expose foreign observations as `missing`, `diverged` or
+`unchanged`, always unqualified for this operation. Foreign observation changes
+alone do not invalidate a reviewed target plan. A changed canonical state or
+required resource still invalidates it. No author, session or age decides the scope.
+
+A local product/merge projection may be `unqualified` with a null control suffix.
+This is not a passing composition test. The selected source is independently
+validated; unrelated local product stays in place. Local bookkeeping may append
+a manifest-only control commit, with the previous HEAD as parent and unchanged
+product blobs/modes. Unselected private product must not enter any updated remote
+ref. No integration realignment or replay is selected by this operation.
+
+After a push interruption, reobserve and replan using the same declared inputs.
+An already-published operation adopts its local metadata without repeating the
+push. The same scope applies to its verification; unselected refs are never
+repaired as an implicit recovery effect. Keep the original receipt until recovery
+is verified. Version 3 and non-compose publication retain their existing global
+validation contract; this increment does not silently relax those operations.

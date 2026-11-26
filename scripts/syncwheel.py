@@ -324,6 +324,7 @@ from syncwheel_ledger import (
     COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES,
 )
 
+import syncwheel_selective_publication as _selective_publication
 import syncwheel_coordination as _coordination
 from syncwheel_coordination import (
     COORDINATION_REMOTE_ROLE_CANONICAL,
@@ -8611,14 +8612,21 @@ def coordination_compose_stack_plan(
         verified_adoption_transition=bool(transition),
     )
     merged_snapshot = composition['merged']
+    scope_manifest = normalize_manifest_data(
+        apply_coordination_snapshot(manifest, merged_snapshot), '<coordination-compose>')
+    ref_validation_scope = _selective_publication.compose_ref_validation_scope(
+        scope_manifest, merged_snapshot, latest['state'], stack_id)
     claimed_refs = list(dict.fromkeys([*latest['state']['managed_refs'], source_ref]))
-    require_exclusive_coordination_ownership(repo_root, config, claimed_refs)
+    require_exclusive_coordination_ownership(
+        repo_root, config, _selective_publication.required_ref_values(
+            dict.fromkeys(claimed_refs), ref_validation_scope))
     observed_refs = remote_ref_tips(
         repo_root, config['remote'], [*claimed_refs, coordination_claim_ref(source_ref)]
     )
     drifted = {
         ref: (tip, observed_refs.get(ref))
-        for ref, tip in latest['state']['managed_refs'].items()
+        for ref, tip in _selective_publication.required_ref_values(
+            latest['state']['managed_refs'], ref_validation_scope).items()
         if observed_refs.get(ref) != tip
     }
     if drifted:
@@ -8638,12 +8646,19 @@ def coordination_compose_stack_plan(
         status = 'publish-required'
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     integration_tip = latest['state']['managed_refs'].get(integration_ref)
-    if not integration_tip or observed_refs.get(integration_ref) != integration_tip:
+    if not integration_tip or (
+        (ref_validation_scope is None or integration_ref not in ref_validation_scope['preservedRefs'])
+        and observed_refs.get(integration_ref) != integration_tip
+    ):
         raise SyncwheelError('coordination compose requires an exact unchanged integration tip')
     local_integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
-    local_control_suffix = coordination_compose_local_control_suffix(
-        repo_root, integration_tip, local_integration_tip
+    local_projection = _selective_publication.local_projection_observation(
+        ref_validation_scope, integration_tip, local_integration_tip,
+        commit_available=lambda tip: commit_exists(repo_root, tip),
+        prove_suffix=lambda published, local: coordination_compose_local_control_suffix(
+            repo_root, published, local),
     )
+    local_control_suffix = local_projection['controlSuffix']
     proposed_manifest = normalize_manifest_data(
         apply_coordination_snapshot(manifest, merged_snapshot), '<coordination-compose>'
     )
@@ -8683,16 +8698,21 @@ def coordination_compose_stack_plan(
         'sourceRef': source_ref,
         'sourceTip': source_tip,
         'expectedRemoteSourceTip': remote_source_tip,
-        'guardedRefs': dict(sorted(observed_refs.items())),
+        'guardedRefs': dict(sorted(_selective_publication.required_ref_values(
+            observed_refs, ref_validation_scope).items())),
         'integrationRef': integration_ref,
         'expectedIntegrationTip': integration_tip,
         'expectedIntegrationTree': ref_tree(repo_root, integration_tip),
         'localIntegrationTip': local_integration_tip,
+        'localProjectionStatus': local_projection['status'],
         'localIntegrationControlSuffix': local_control_suffix,
         'localIntegrationControlSuffixDigest': canonical_json_digest(
             local_control_suffix
         ),
         'unmappedIntegrationCommits': unmapped,
+        'refValidationScope': ref_validation_scope,
+        'foreignRefObservations': _selective_publication.foreign_ref_observations(
+            ref_validation_scope, observed_refs),
         'deferredForeignHistory': deferred_foreign_history,
         'unmappedIntegrationClassificationComplete': not bool(deferred_foreign_history),
         'adoptionTransition': transition,
@@ -8732,6 +8752,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         repo_root, proposed_manifest, manifest_path, retry_fingerprint
     )
     publication_landed = False
+    foreign_observations = plan.get('foreignRefObservations', {})
     if publication_operation:
         config = coordination_config(proposed_manifest)
         observed_publication = read_remote_coordination_state(
@@ -8767,8 +8788,19 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
             plan.get('knownBaseStateTip'),
             plan.get('knownBaseManifestDigest'),
         )
-    if current != plan:
+    if not _selective_publication.same_compose_publication_plan(current, plan):
         raise SyncwheelError('coordination compose STOP: reviewed plan drifted')
+    foreign_observations = current.get('foreignRefObservations', {})
+    if publication_landed and plan.get('refValidationScope') is not None:
+        scope = plan['refValidationScope']
+        try:
+            observed_foreign = remote_ref_tips(repo_root, config['remote'], scope['preservedRefs'])
+        except SyncwheelError:
+            foreign_observations = {
+                ref: {'recorded': tip, 'observed': None, 'status': 'unavailable', 'qualified': False}
+                for ref, tip in scope['preservedRefs'].items()}
+        else:
+            foreign_observations = _selective_publication.foreign_ref_observations(scope, observed_foreign)
     if publication_operation and plan['status'] == 'adopt-only':
         result = coordinated_publish(
             repo_root,
@@ -8781,6 +8813,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
                 'expected_coordination_state_tip'
             ],
             operation_token=publication_operation['operation_token'],
+            ref_validation_scope=plan.get('refValidationScope'),
         )
         if (
             result.get('status') not in {'recovered', 'already_published'}
@@ -8809,6 +8842,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
             expected_coordination_state_tip=plan['expectedRemoteStateTip'],
             expected_observed_refs=plan['guardedRefs'],
             operation_token=publication_operation['operation_token'],
+            ref_validation_scope=plan.get('refValidationScope'),
         )
         if result.get('status') not in {'published', 'recovered'}:
             raise SyncwheelError('coordination compose publication outcome requires a fresh plan')
@@ -8829,10 +8863,13 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
             raise SyncwheelError('coordination compose post-verification failed: invalid state child')
         verify_coordination_state_manifest_digest(repo_root, state, config['remote'])
         require_exclusive_coordination_ownership(
-            repo_root, config, state['managed_refs']
+            repo_root, config, _selective_publication.required_ref_values(
+                state['managed_refs'], plan.get('refValidationScope'))
         )
         observed = remote_ref_tips(repo_root, config['remote'], state['managed_refs'])
-        if observed != state['managed_refs']:
+        foreign_observations = _selective_publication.foreign_ref_observations(
+            plan.get('refValidationScope'), observed)
+        if _selective_publication.required_ref_values(observed, plan.get('refValidationScope')) != _selective_publication.required_ref_values(state['managed_refs'], plan.get('refValidationScope')):
             raise SyncwheelError('coordination compose post-verification failed: managed refs drifted')
     observed_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not observed_manifest or manifest_digest(observed_manifest) != plan['localProposalDigest']:
@@ -8882,6 +8919,9 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         'unmapped_integration_commits': plan['unmappedIntegrationCommits'],
         'unmapped_integration_classification_complete': plan['unmappedIntegrationClassificationComplete'],
         'deferred_foreign_history': plan['deferredForeignHistory'],
+        'ref_validation_scope': plan.get('refValidationScope'),
+        'local_projection_status': plan.get('localProjectionStatus'),
+        'foreign_ref_observations': foreign_observations,
     }
 
 
