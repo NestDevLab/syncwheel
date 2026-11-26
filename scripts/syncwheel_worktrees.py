@@ -303,7 +303,7 @@ class WorktreeStorage(Protocol):
 
 
 class WorktreeObserver(Protocol):
-    def effective_worktree_policy(self, repo_root): ...
+    def effective_worktree_policy(self, repo_root, *, lane=None): ...
     def governed_lane_remedy(self, manifest, lane, *, commit_first=False): ...
     def governed_worktree_registry_io_checkpoint(self, stage): ...
     def governed_worktree_cleanup_checkpoint(self, stage): ...
@@ -487,7 +487,7 @@ class GovernedWorktrees:
     def governed_worktree_lane_status(self, manifest, lane, now=None, manifest_path=None):
         repo_root = self.repository.root
         now = now or datetime.datetime.now(datetime.timezone.utc)
-        expiry = self.observer.effective_worktree_policy(repo_root)['expiry']
+        expiry = self.observer.effective_worktree_policy(repo_root, lane=lane)['expiry']
         root = self.governed_worktree_root(manifest)
         registered_path = Path(lane['path']).resolve(strict=False)
         worktree = self.repository.find_worktree_record_for_branch(repo_root, lane['branch'])
@@ -1099,7 +1099,7 @@ class GovernedWorktrees:
             expired = governed_worktree_lane_lease_expired(
                 lane,
                 datetime.datetime.now(datetime.timezone.utc),
-                self.observer.effective_worktree_policy(repo_root)['expiry'],
+                self.observer.effective_worktree_policy(repo_root, lane=lane)['expiry'],
             )
             abandoned_missing = not path_exists and governed_worktree_owner_is_dead(lane['owner'])
             if not expired and not abandoned_missing:
@@ -1411,8 +1411,10 @@ class GovernedWorktrees:
     def automatic_cleanup_hold(self):
         actor = self.repository.governed_worktree_owner()
         now = datetime.datetime.now(datetime.timezone.utc)
-        expiry = self.observer.effective_worktree_policy(self.repository.root)['expiry']
-        return lambda lane: automatic_lane_cleanup_hold(lane, actor, now, expiry)
+        return lambda lane: automatic_lane_cleanup_hold(
+            lane, actor, now,
+            self.observer.effective_worktree_policy(self.repository.root, lane=lane)['expiry'],
+        )
 
     def capture_governed_worktrees_for_stack(self, manifest, stack_id, manifest_path=None):
         repo_root = self.repository.root

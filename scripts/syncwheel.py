@@ -5335,16 +5335,20 @@ def worktree_policy_root(repo_root):
     return Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root).resolve()
 
 
-def effective_worktree_policy(repo_root):
-    return _worktree_policy.resolve_policy(
+def effective_worktree_policy(repo_root, *, lane=None, current_context=True):
+    return _worktree_policy.effective_for_context(
         load_json_file(get_settings_path(), {}),
         load_repo_profile(worktree_policy_root(repo_root)),
+        lane=lane, lane_generation=governed_worktree_generation_token, current_context=current_context,
+        checkout_path=Path(repo_root).resolve(),
+        load_lanes=lambda: load_governed_worktree_registry(repo_root)[0]['lanes'],
+        normalize_path=lambda path: Path(path).resolve(),
     )['effective']
 
 
 def command_worktree_policy(args):
     options = {}
-    if args.policy_scope == 'repo':
+    if args.policy_scope in {'repo', 'lane'}:
         root = worktree_policy_root(resolve_repo_root(args.repo))
         path = checked_repo_profile_path(root)
         if args.policy_action != 'status' and (git_path_is_tracked(root, path) or git(
@@ -5354,6 +5358,12 @@ def command_worktree_policy(args):
             raise SyncwheelError('worktree policy profile must be ignored and untracked')
         options = dict(profile_path=path, load_profile=lambda: load_repo_profile(root),
                        write_profile=lambda value: save_repo_profile(root, value))
+        if args.policy_scope == 'lane':
+            options.update(
+                registry_lock=lambda: governed_worktree_registry_lock(root),
+                load_lanes=lambda: load_governed_worktree_registry(root)[0]['lanes'],
+                lane_generation=governed_worktree_generation_token,
+            )
     return _worktree_policy.run_policy_command(
         args, settings_path=get_settings_path(), load_json=load_private_configuration,
         write_json=save_private_configuration, **options,
@@ -12195,7 +12205,8 @@ def command_worktree_open(args):
         if stack:
             _worktree_policy.admit_writers(
                 [item for item in registry['lanes'] if item.get('target') == stack['id']],
-                governed_worktree_owner(), effective_worktree_policy(repo_root),
+                governed_worktree_owner(), effective_worktree_policy(repo_root, current_context=False),
+                policy_for_lane=lambda item: effective_worktree_policy(repo_root, lane=item),
             )
         active = [
             item for item in registry['lanes']
@@ -20023,7 +20034,8 @@ def command_hooks_worktree_guard(args):
             _worktree_policy.admit_writers(
                 [lane for lane in registry['lanes']
                  if Path(lane['path']).resolve() == current_path],
-                governed_worktree_owner(), effective_worktree_policy(repo_root),
+                governed_worktree_owner(), effective_worktree_policy(repo_root, current_context=False),
+                policy_for_lane=lambda item: effective_worktree_policy(repo_root, lane=item),
             )
         return 0
     guard, guard_error = inspect_primary_guard(repo_root)
@@ -20832,7 +20844,8 @@ def governed_worktree_preflight(args):
         }
         blockers = _worktree_policy.scoped_recovery_blockers(
             [lane for lane in registry['lanes'] if lane.get('target') in scoped_stacks],
-            health, effective_worktree_policy(repo_root), governed_worktree_owner(),
+            health, effective_worktree_policy(repo_root, current_context=False), governed_worktree_owner(),
+            policy_for_lane=lambda item: effective_worktree_policy(repo_root, lane=item),
         )
         if blockers:
             # Name each lane's health and remedy: the warnings above may have
@@ -21645,8 +21658,8 @@ class _GovernedWorktreeRepository:
     def coordination_publication_lock_path(self, *args, **kwargs):
         return coordination_publication_lock_path(*args, **kwargs)
 
-    def effective_worktree_policy(self, repo_root):
-        return effective_worktree_policy(repo_root)
+    def effective_worktree_policy(self, repo_root, *, lane=None):
+        return effective_worktree_policy(repo_root, lane=lane)
 
     def governed_lane_remedy(self, *args, **kwargs):
         return governed_lane_remedy(*args, **kwargs)

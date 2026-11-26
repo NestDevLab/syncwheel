@@ -36,14 +36,18 @@ def worktree_policy_field(value):
     return value
 
 
-def add_worktree_policy_parser(parent, commands, *, scope, common=None):
-    policy = parent.add_parser('worktree-policy', help='user defaults or private repository worktree policy')
+def add_worktree_policy_parser(parent, commands, *, scope, common=None, name='worktree-policy'):
+    policy = parent.add_parser(name, help='user, repository or lane worktree preferences')
+    if scope == 'lane':
+        policy.add_argument('lane', help='stable governed lane id')
     actions = policy.add_subparsers(dest='policy_action', required=True)
     for action in ('status', 'set', 'clear'):
         parser = actions.add_parser(action, parents=[common] if common is not None else [])
         parser.set_defaults(func=commands['command_worktree_policy'], policy_scope=scope)
         parser.add_argument('-j', '--json', action='store_true')
         if action == 'set':
+            if scope == 'lane':
+                parser.add_argument('--bind-generation', help='explicitly bind new overrides to this current generation')
             for field, values in POLICY_VALUES.items():
                 parser.add_argument('--' + field.replace('_', '-'), choices=values)
         if action == 'clear':
@@ -540,6 +544,7 @@ def build_parser(commands, version):
 
     worktree_p = sub.add_parser('worktree', aliases=['wt'], help='manage governed local worktrees and safety locks')
     worktree_sub = worktree_p.add_subparsers(dest='worktree_command', required=True)
+    add_worktree_policy_parser(worktree_sub, commands, scope='lane', common=common, name='policy')
 
     worktree_open_p = worktree_sub.add_parser('open', parents=[common])
     worktree_open_p.add_argument('lane')

@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.48.1`
+Current version: `0.49.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1687,10 +1687,11 @@ journal publish. A prepared receipt retained after interruption records the
 intended transition; inspect the branch before deciding whether rollback is
 needed.
 
-### User and repository worktree preferences
+### User, repository and lane worktree preferences
 
 Configure lease expiry and logical writer admission independently with
-`syncwheel self worktree-policy` and `syncwheel repo worktree-policy`.
+`syncwheel self worktree-policy`, `syncwheel repo worktree-policy` and
+`syncwheel worktree policy <lane-id>`.
 The user commands also work outside a repository; repository overrides inherit
 per field. Existing behavior is preserved when unset. See
 [Worktree preferences](docs/worktree-policy.md) for values, previews, inheritance,
