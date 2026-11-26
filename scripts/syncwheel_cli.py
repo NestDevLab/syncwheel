@@ -1401,3 +1401,14 @@ def attach_command_behaviors(parser, table):
     unused = sorted(function.__name__ for function in set(table) - registered)
     if unused:
         raise RuntimeError('unregistered command behavior(s): ' + ', '.join(unused))
+
+
+def build_test_slot_parser():
+    """Grammar for the separate cooperative test-slot entrypoint."""
+    parser = argparse.ArgumentParser(prog='syncwheel-test-slot',
+        description='Run or recover a reviewed cooperative job in one physical test slot.')
+    parser.add_argument('action', choices=['status', 'inspect', 'run', 'recover', 'cleanup', '_worker'])
+    parser.add_argument('workspace')
+    parser.add_argument('input', nargs='?', help='request JSON for inspect/run; recorded nonce for recover/cleanup')
+    parser.add_argument('--timeout', type=int, default=300)
+    return parser

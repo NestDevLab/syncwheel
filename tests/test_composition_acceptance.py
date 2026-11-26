@@ -218,6 +218,8 @@ class CompositionAcceptanceTest(unittest.TestCase):
         self.assertEqual(fixture.git('rev-parse', fallback + '^{tree}'),
                          fixture.git('rev-parse', receipt['tip'] + '^{tree}'))
         self.assertEqual(channel['composition'], pins_before)
+        self.assertEqual(module.materialize_channel_tree(fixture.repo, channel),
+                         fixture.git('rev-parse', receipt['tip'] + '^{tree}'))
 
         twin = fixture.make_stack('g-twin', 'g.py', "VALUE = 'g'\n")
         fixture.git('switch', '-q', 'main-integration')
@@ -231,6 +233,9 @@ class CompositionAcceptanceTest(unittest.TestCase):
         refused = fixture.cli('channel', 'apply', 'equivalent-patch', '--plan-digest',
                               twin_plan['planDigest'], '--apply', expected=2)
         self.assertIn('empty', refused.stderr)
+        twin_channel = next(c for c in fixture.manifest()['channels'] if c['id'] == 'equivalent-patch')
+        with self.assertRaisesRegex(module.SyncwheelError, 'empty'):
+            module.materialize_channel_tree(fixture.repo, twin_channel)
         self.assertEqual(fixture.git('show-ref', '--verify', 'refs/heads/channel/equivalent-patch', check=False), '')
 
 

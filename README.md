@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.51.1`
+Current version: `0.52.0`
 
 Operational private `disabled`, `minimal`, `standard`, `strict` and per-field
 custom preferences are available through
@@ -710,6 +710,11 @@ Publishing `channel/test` proves only that a specific Git composition is
 available on that branch. It does **not** prove that an environment has deployed
 or is healthy. See [deployment channels](docs/deployment-channels.md) for the
 complete CLI, failure, and CI/CD boundary.
+
+For reviewed cooperative local jobs, see the
+[exclusive test-slot contract](docs/design/cooperative-test-slot.md). The separate
+`syncwheel-test-slot` entrypoint binds immutable channel inputs to one physical
+workspace, with retained native-unit recovery and explicit receipt boundaries.
 
 ## System flow (visual)
 

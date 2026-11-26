@@ -17,6 +17,7 @@ dependencies = []
 [project.scripts]
 syncwheel = "syncwheel:main"
 syncwheel-github = "syncwheel_github:main"
+syncwheel-test-slot = "syncwheel:main_test_slot"
 
 [tool.setuptools]
 py-modules = [
@@ -40,6 +41,8 @@ py-modules = [
   "syncwheel_policy",
   "syncwheel_execution_policy",
   "syncwheel_private_json",
+  "syncwheel_test_slot",
+  "syncwheel_test_slot_native",
   "syncwheel_retire_copy",
   "syncwheel_stack_recovery",
   "syncwheel_coordination_state",
