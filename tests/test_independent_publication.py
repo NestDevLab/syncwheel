@@ -40,9 +40,13 @@ class IndependentPublicationTest(unittest.TestCase):
         # Git remote. Legacy startup refreshes its update cache even in off mode;
         # a source checkout would therefore fetch the developer's tool remote.
         bundle = self.fixture.tmp / 'tool-bundle'
-        self.fixture.copy_syncwheel_modules(bundle)
+        if getattr(self, 'runtime_cli', None) is None:
+            self.fixture.copy_syncwheel_modules(bundle)
+        else:
+            bundle.mkdir()
         shutil.copy2(fixtures.REPO_ROOT / 'VERSION', bundle / 'VERSION')
-        cli_path = mock.patch.object(fixtures, 'CLI', bundle / 'syncwheel.py')
+        cli_path = mock.patch.object(fixtures, 'CLI',
+                                     getattr(self, 'runtime_cli', None) or bundle / 'syncwheel.py')
         cli_path.start()
         self.addCleanup(cli_path.stop)
         local_update_state = mock.patch.dict(os.environ, {
@@ -54,8 +58,9 @@ class IndependentPublicationTest(unittest.TestCase):
         })
         local_update_state.start()
         self.addCleanup(local_update_state.stop)
-        self.module = self.fixture.load_syncwheel_module()
-        self.assertEqual(self.module.detect_syncwheel_install()['kind'], 'script')
+        self.module = getattr(self, 'runtime_module', None) or self.fixture.load_syncwheel_module()
+        expected_kind = getattr(self, 'runtime_install_kind', 'script')
+        self.assertEqual(self.module.detect_syncwheel_install()['kind'], expected_kind)
         self.manifest_path = self.repo / '.syncwheel/manifest.json'
         self.origin = self.fixture.tmp / 'origin.git'
         self.git('init', '--bare', '-q', str(self.origin))

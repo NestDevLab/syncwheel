@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -116,6 +117,121 @@ class CompositionAcceptanceTest(unittest.TestCase):
         with self.assertRaises(SyntaxError):
             compile(fixture.git('show', 'channel/broken:i.py'), 'i.py', 'exec')
         self.assertEqual(fixture.git('rev-parse', 'channel/selected'), receipt['tip'])
+
+    def test_broken_prerequisite_blocks_only_its_selected_dependent(self):
+        fixture = self.fixture
+        broken = fixture.make_stack('g', 'g.py', 'def broken(:\n')
+        fixture.git('switch', '-q', 'main-integration')
+        fixture.declare_stack_tip('g', broken)
+        before = self.sources()
+        refused = fixture.cli('channel', 'create', 'without-g', '--stack', 'j', expected=2)
+        self.assertIn('requires earlier dependency', refused.stderr)
+        fixture.create('dependent', stacks=('g', 'j'))
+        _, dependent = fixture.apply_channel('dependent')
+        g_source = fixture.git('show', f"{dependent['tip']}:g.py")
+        with self.assertRaises(SyntaxError):
+            compile(g_source, 'g.py', 'exec')
+        fixture.create('independent', stacks=('d',))
+        _, independent = fixture.apply_channel('independent')
+        compile(fixture.git('show', f"{independent['tip']}:d.py"), 'd.py', 'exec')
+        self.assertEqual(self.sources(), before)
+        fixture.mutate('channel', 'close', 'dependent')
+        abandoned = fixture.cli('stack', 'close', 'g', '--reason', 'abandoned', expected=2)
+        self.assertIn('depend', abandoned.stderr)
+        self.assertEqual(fixture.git('rev-parse', 'channel/dependent'), dependent['tip'])
+        data = fixture.manifest()
+        self.assertEqual(next(item for item in data['stacks'] if item['id'] == 'j')['depends_on'], ['g'])
+
+    def test_actual_check_detects_undeclared_semantic_dependency(self):
+        fixture = self.fixture
+        # The commit graph alone cannot infer an import's runtime requirement.
+        hidden = fixture.make_stack('d', 'd.py', 'from a import VALUE\nassert VALUE == "a"\n')
+        fixture.git('switch', '-q', 'main-integration')
+        fixture.declare_stack_tip('d', hidden)
+        fixture.create('hidden', stacks=('d',))
+        _, receipt = fixture.apply_channel('hidden')
+        export = fixture.root / 'check-export'
+        export.mkdir()
+        (export / 'd.py').write_text(fixture.git('show', f"{receipt['tip']}:d.py"))
+        command = [sys.executable, '-I', '-c',
+                   'import runpy,sys; sys.path.insert(0,sys.argv[1]); runpy.run_path(sys.argv[1]+"/d.py")',
+                   str(export)]
+        checked = subprocess.run(command,
+                                 cwd=export, capture_output=True, text=True)
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn('ModuleNotFoundError', checked.stderr)
+        self.assertNotIn('a.py', fixture.git('ls-tree', '--name-only', receipt['tip']).splitlines())
+        fixture.mutate('channel', 'close', 'hidden')
+        data = fixture.manifest()
+        next(item for item in data['stacks'] if item['id'] == 'd')['depends_on'] = ['a']
+        (fixture.repo / '.syncwheel/manifest.json').write_text(json.dumps(data) + '\n')
+        fixture.create('declared', stacks=('a', 'd'))
+        _, declared = fixture.apply_channel('declared')
+        for path in ('a.py', 'd.py'):
+            (export / path).write_text(fixture.git('show', f"{declared['tip']}:{path}"))
+        checked = subprocess.run(command, cwd=export, capture_output=True, text=True)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(fixture.git('rev-parse', 'channel/hidden'), receipt['tip'])
+
+    def test_promoting_a_draft_does_not_select_it_for_the_existing_composition(self):
+        fixture = self.fixture
+        fixture.create('selected', stacks=('d', 'e'))
+        _, receipt = fixture.apply_channel('selected')
+        selected = next(c for c in fixture.manifest()['channels'] if c['id'] == 'selected')
+        fixture.cli('stack', 'promote', 'a', '--branch', 'pr/a')
+        self.assertEqual(next(c for c in fixture.manifest()['channels'] if c['id'] == 'selected'), selected)
+        self.assertEqual(fixture.git('rev-parse', 'channel/selected'), receipt['tip'])
+        self.assertNotIn('a.py', fixture.git('ls-tree', '--name-only', receipt['tip']).splitlines())
+        self.assertEqual(next(s for s in fixture.manifest()['stacks'] if s['id'] == 'a')['state'], 'published')
+
+    def test_integrated_prerequisite_is_present_in_the_new_pinned_base(self):
+        fixture = self.fixture
+        data = fixture.manifest()
+        # Keep old source ranges stable when the remote delivery base advances.
+        for stack in data['stacks']:
+            stack['base'] = fixture.base
+        fixture.git('push', '-q', 'origin', 'pr/g:main')
+        integrated = fixture.git('rev-parse', 'origin/main')
+        fixture.git('switch', '-q', '-c', 'pr/j-updated', integrated)
+        (fixture.repo / 'j.py').write_text('from g import VALUE\nassert VALUE == "g"\n')
+        fixture.git('add', 'j.py')
+        fixture.git('commit', '-q', '-m', 'dependent on delivered base')
+        tip = fixture.git('rev-parse', 'HEAD')
+        fixture.git('switch', '-q', 'main-integration')
+        updated = dict(next(s for s in data['stacks'] if s['id'] == 'j'))
+        updated.update(id='j-updated', branch='pr/j-updated', base='origin/main', commits=[tip])
+        data['stacks'].append(updated)
+        data['integration']['stacks'].append('j-updated')
+        (fixture.repo / '.syncwheel/manifest.json').write_text(json.dumps(data) + '\n')
+        fixture.create('new-base', stacks=('g', 'j-updated'))
+        plan, receipt = fixture.apply_channel('new-base')
+        self.assertEqual(plan['baseRevision'], integrated)
+        self.assertEqual(fixture.git('merge-base', '--is-ancestor', integrated, receipt['tip']), '')
+        self.assertEqual(fixture.git('show', f"{receipt['tip']}:g.py"), "VALUE = 'g'")
+        self.assertEqual(fixture.git('show', f"{receipt['tip']}:j.py"), 'from g import VALUE\nassert VALUE == "g"')
+        self.assertEqual(next(s for s in fixture.manifest()['stacks'] if s['id'] == 'j-updated')['depends_on'], ['g'])
+        channel = next(c for c in fixture.manifest()['channels'] if c['id'] == 'new-base')
+        pins_before = json.loads(json.dumps(channel['composition']))
+        module = fixture.load_module()
+        with mock.patch.object(module.ReplayEngine, 'git_supports_write_tree', return_value=False):
+            fallback = module.materialize_channel_tip(fixture.repo, channel, plan)
+        self.assertEqual(fixture.git('rev-parse', fallback + '^{tree}'),
+                         fixture.git('rev-parse', receipt['tip'] + '^{tree}'))
+        self.assertEqual(channel['composition'], pins_before)
+
+        twin = fixture.make_stack('g-twin', 'g.py', "VALUE = 'g'\n")
+        fixture.git('switch', '-q', 'main-integration')
+        data = fixture.manifest()
+        data['stacks'].append(dict(id='g-twin', branch='pr/g-twin', base=fixture.base,
+            target_remote='origin', target_branch='main', integration_branch='main-integration', commits=[twin]))
+        data['integration']['stacks'].append('g-twin')
+        (fixture.repo / '.syncwheel/manifest.json').write_text(json.dumps(data) + '\n')
+        fixture.create('equivalent-patch', stacks=('g-twin',))
+        twin_plan = fixture.plan('equivalent-patch')
+        refused = fixture.cli('channel', 'apply', 'equivalent-patch', '--plan-digest',
+                              twin_plan['planDigest'], '--apply', expected=2)
+        self.assertIn('empty', refused.stderr)
+        self.assertEqual(fixture.git('show-ref', '--verify', 'refs/heads/channel/equivalent-patch', check=False), '')
 
 
 if __name__ == '__main__':

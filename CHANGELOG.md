@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.51.1 - 2026-11-26
+
+- Materialize pinned channels whose prerequisite commits are already ancestors of the exact base, preserving raw pins, dependencies and evidence digests. Keep unrelated equivalent patches and real conflicts fail-closed; qualify dependent, returning-author and draft-selection scenarios.
+
 ## 0.51.0 - 2026-11-26
 
 - Activate Standard and Strict execution preferences through the existing scope resolver and gates, with custom per-field overrides and provenance. Keep logical expiry off and writer admission advisory in every preset, while preserving real locks, dirty work and CAS. Scope optional all-check validation to the exact candidate and require exact-revision provenance for mandatory forge checks under operational preferences. Preserve disabled/minimal and legacy behavior without opt-in; installed smoke remains release evidence.
