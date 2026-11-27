@@ -3,8 +3,8 @@
 ## 0.53.0 - 2026-11-27
 
 - Place a version 1 draft before an existing integration member. Preserve historical source and resolved projection identities in replay order.
-
 - Recover a missing stack source with a create-only ref transaction. Bind plumbing and ephemeral stack rebuilds to the observed destination.
+- Bind a reviewed recipe append to the source tip and selected manifest through tracked metadata persistence.
 
 ## 0.52.1 - 2026-11-26
 

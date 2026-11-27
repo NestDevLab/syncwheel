@@ -1029,6 +1029,10 @@ def build_parser(commands, version):
     stack_add_p = stack_sub.add_parser('add', parents=[common])
     stack_add_p.add_argument('stack')
     stack_add_p.add_argument('specs', nargs='+')
+    stack_add_p.add_argument(
+        '--at-source', nargs=2, metavar=('TIP', 'MANIFEST_SHA256'),
+        help='bind recipe registration to an exact source ref and reviewed manifest file bytes',
+    )
     stack_add_p.set_defaults(func=commands['command_stack_add'])
 
     stack_capture_p = stack_sub.add_parser(

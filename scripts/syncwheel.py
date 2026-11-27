@@ -21273,6 +21273,23 @@ def route_stack_add_from_governed_lane(args):
     args.repo = str(primary_root)
 
 
+@contextlib.contextmanager
+def stack_add_source_lease(args, repo_root, manifest_path):
+    """Hold the reviewed source throughout recipe persistence and tracked metadata commit."""
+    tip, manifest_hash = args.at_source
+    if not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', tip) or not re.fullmatch(r'[0-9a-f]{64}', manifest_hash):
+        raise SyncwheelError('--at-source requires a full commit ID and manifest file SHA-256')
+    if hashlib.sha256(manifest_path.read_bytes()).hexdigest() != manifest_hash:
+        raise SyncwheelError('reviewed manifest has changed; inspect it before registering commits')
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    ref = f"refs/heads/{stack['branch']}"
+    if get_current_branch(repo_root) == stack['branch']:
+        raise SyncwheelError('--at-source requires a control checkout separate from the source branch')
+    with _StackRepository(repo_root).prepared_ref_transaction([f'verify {ref} {tip}']):
+        yield
+
+
 def main():
     clear_commit_memo()
     parser = build_parser()
@@ -21390,11 +21407,13 @@ def main():
                     existing_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                     if existing_manifest:
                         ensure_managed_repository_hooks(repo_root, existing_manifest, manifest_path)
-                with manifest_write_transaction(
+                with contextlib.ExitStack() as source_leases, manifest_write_transaction(
                     repo_root, manifest_path, 'manifest-command',
                     commit_tracked_changes=(args.func != command_stack_capture_integration
                                             and not getattr(args, '_metadata_preserve_primary', False)),
                 ):
+                    if args.func == command_stack_add and args.at_source:
+                        source_leases.enter_context(stack_add_source_lease(args, repo_root, manifest_path))
                     primary_root = getattr(args, '_metadata_primary_root', None)
                     if primary_root is not None:
                         selected, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
@@ -22335,6 +22354,13 @@ class _StackRepository:
 
     def capture_ref_transaction(self, operations, authorization=None, *, checked_out_ref=None,
                                 check_prepared=None, fsync_refs=False):
+        with self.prepared_ref_transaction(operations, authorization, checked_out_ref=checked_out_ref,
+                                           fsync_refs=fsync_refs):
+            if check_prepared is not None:
+                check_prepared()
+
+    @contextlib.contextmanager
+    def prepared_ref_transaction(self, operations, authorization=None, *, checked_out_ref=None, fsync_refs=False):
         commands = ['start']
         for operation in operations:
             commands.extend(('option no-deref', operation))
@@ -22377,8 +22403,7 @@ class _StackRepository:
                         self.root, ref.removeprefix('refs/heads/'),
                     ):
                         raise SyncwheelError(f'capture ref is checked out before commit: {ref}')
-                if check_prepared is not None:
-                    check_prepared()
+                yield
                 process.stdin.write('commit\n')
                 process.stdin.flush()
                 require_response('commit: ok')

@@ -2862,6 +2862,7 @@ class StackLifecycle:
                 f"stack {stack['id']} projection failed after adding commits; "
                 f"the stack branch cannot be rebuilt cleanly from the manifest:\n{detail}"
             )
+        return report
 
 
     def validate_integration_first_base(self, manifest, added_commits):
@@ -2906,7 +2907,13 @@ class StackLifecycle:
                     added_commits.append(commit)
         self.validate_integration_first_base(manifest, added_commits)
         stack['commits'] = list(dict.fromkeys(commits))
-        self.validate_stack_update(manifest, stack, previous_commits)
+        report = self.validate_stack_update(manifest, stack, previous_commits)
+        if getattr(args, 'at_source', None):
+            if report['local_tree'] != report['projected_tree']:
+                raise SyncwheelError('proposed recipe does not reproduce the reviewed source tree')
+            if any(not self.repository.branch_contains(repo_root, args.at_source[0], commit)
+                   for commit in added_commits):
+                raise SyncwheelError('added commit is not in the reviewed source history')
         self.control.save_manifest_with_ledger(
             repo_root,
             manifest_path,
@@ -3202,7 +3209,7 @@ class StackLifecycle:
             dry_run=args.dry_run,
             mode=mode,
             worktree=worktree,
-            create_only=args.create_only,
+            create_only=getattr(args, 'create_only', False),
         )
         return 0
 

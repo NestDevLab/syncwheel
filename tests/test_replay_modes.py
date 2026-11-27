@@ -7,6 +7,7 @@ between executions. Do not replace this comparison with source-SHA equality.
 """
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -219,6 +220,49 @@ class ReplayModesTest(unittest.TestCase):
         events = [e for e in module.load_ledger_events(repo) if e['type'] == 'stack_rebuilt']
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]['payload']['after_tip'], git(repo, 'rev-parse', ref).stdout.strip())
+
+    def test_guarded_stack_add_pins_source_through_tracked_manifest_commit(self):
+        source, manifest, stack_id = build_linear_chain(self.tmp)
+        stack = manifest['stacks'][0]
+        first, second = stack['commits']
+        stack['commits'] = [first]
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        repo = clone_repo(source, self.tmp / 'guarded-add', manifest)
+        path = repo / '.syncwheel/manifest.json'
+        git(repo, 'add', str(path))
+        git(repo, 'commit', '-qm', 'track control recipe')
+        ref = 'refs/heads/' + stack['branch']
+        reviewed = path.read_bytes()
+        digest = hashlib.sha256(reviewed).hexdigest()
+        git(repo, 'branch', stack['branch'], first)
+        git(repo, 'worktree', 'add', '-q', str(self.tmp / 'source-desk'), stack['branch'])
+        git(self.tmp / 'source-desk', 'merge', '--ff-only', second)
+        concurrent = git(repo, 'commit-tree', second + '^{tree}', '-p', second, '-m', 'peer').stdout.strip()
+        git(repo, 'update-ref', ref, concurrent, second)
+        add = ('stack', 'add', stack_id, second, '--at-source', second)
+        self.assertIn('expected', run_cli(repo, *add, digest, expected=2).stderr)
+        self.assertEqual(path.read_bytes(), reviewed)
+        self.assertEqual(git(repo, 'rev-parse', ref).stdout.strip(), concurrent)
+        git(repo, 'update-ref', ref, second, concurrent)
+        self.assertIn('manifest has changed', run_cli(repo, *add, '0' * 64, expected=2).stderr)
+        self.assertEqual(path.read_bytes(), reviewed)
+        # A second writer attempts the source update during the actual control commit.
+        real_git = shutil.which('git')
+        shim = self.tmp / 'stable-bin/git'
+        trace = self.tmp / 'peer-error'
+        shim.write_text(
+            '#!/bin/sh\n'
+            'case " $* " in *" commit --only "*)\n'
+            f'  "{real_git}" update-ref {ref} {concurrent} {second} 2>"{trace}" && exit 1;;\n'
+            'esac\n'
+            f'exec "{real_git}" "$@"\n'
+        )
+        shim.chmod(0o755)
+        run_cli(repo, *add, digest)
+        self.assertIn('cannot lock ref', trace.read_text())
+        self.assertEqual(git(repo, 'rev-parse', ref).stdout.strip(), second)
+        saved = json.loads(git(repo, 'show', 'HEAD:.syncwheel/manifest.json').stdout)
+        self.assertEqual(saved['stacks'][0]['commits'], [first, second])
 
     def test_ephemeral_stack_rebuild_leaves_no_worktree(self):
         source_repo, manifest, stack_id = build_linear_chain(self.tmp)

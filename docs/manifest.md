@@ -519,6 +519,19 @@ To recover an existing recipe whose source branch must still be absent, use
 under a Git ref transaction, and records `stack_rebuilt` on success. It
 refuses a concurrent branch or symbolic ref and never publishes the branch.
 
+After a reviewed fast-forward, use the guarded form to register a recipe
+against that exact result. Record the selected manifest file's SHA-256 at
+review time. Run the command from the control checkout:
+
+```bash
+syncwheel stack add STACK REVIEWED_COMMITS --at-source FULL_SOURCE_TIP MANIFEST_SHA256
+```
+
+Git holds the source ref through the tracked manifest commit. Syncwheel checks
+the reviewed manifest bytes, requires the new commits on the pinned source,
+and verifies that the complete recipe reproduces its tree. If either input
+changed, inspect the new state and review the delta again.
+
 ### Ordered historical drafts (version 1, cherry-pick integration)
 
 When a later stack consumes a historical change, insert a non-publishing draft
