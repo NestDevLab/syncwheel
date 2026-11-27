@@ -272,6 +272,8 @@ from syncwheel_contracts import iso_utc_now, parse_coordination_timestamp
 from syncwheel_replay import (
     normalize_integration_desk_step_phases,
     integration_desk_capture_parent,
+    continue_ordinary_empty_desk_step,
+    load_ordinary_empty_replay_proofs,
     ReplayEngine,
     replay_hygiene_env,
     requested_replay_mode,
@@ -17880,6 +17882,29 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
     return 0
 
 
+def continue_ordinary_empty_desk(repo_root, manifest, manifest_path, receipt_path, receipt, desk):
+    def current():
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
+        _manifest_storage.preflight_control_manifest_digest(repo_root, manifest_path, manifest)
+        _, observed, _ = read_integration_desk(repo_root, manifest, manifest_path, desk)
+        if observed != receipt:
+            raise SyncwheelError('integration desk receipt changed during ordinary empty continuation')
+    return continue_ordinary_empty_desk_step(
+        repo_root, manifest, manifest_path, receipt_path, receipt, desk,
+        git=git, current=current, write_receipt=atomic_write_private_json,
+        append_event=append_ledger_event,
+    )
+
+
+def ordinary_empty_replay_proofs(repo_root, manifest):
+    return load_ordinary_empty_replay_proofs(
+        repo_root, manifest,
+        inputs=integration_desk_inputs(repo_root, manifest, repo_root / '.syncwheel/manifest.json'),
+        common_dir=git_common_dir(repo_root), receipt_path=integration_desk_receipt_path,
+        load_events=_manifest_storage.load_ledger_events,
+    )
+
+
 def integration_desk_has_exact_empty_step(desk, receipt, step):
     """Recognize only a stopped integration-only pick with no tree change."""
     argv = step.get('argv') or []
@@ -17976,15 +18001,23 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
         while receipt['next'] < len(receipt['steps']):
             step = receipt['steps'][receipt['next']]
             argv = step['argv']
-            if not step.get('integration_only'):
-                receipt['stack_bases'].setdefault(step['stack_id'], receipt['head'])
-            atomic_write_private_json(receipt_path, receipt, indent=2)
+            if not step.get('integration_only') and step['stack_id'] not in receipt['stack_bases']:
+                receipt['stack_bases'][step['stack_id']] = receipt['head']
+                atomic_write_private_json(receipt_path, receipt, indent=2)
+            if continue_ordinary_empty_desk(
+                repo_root, manifest, manifest_path, receipt_path, receipt, desk,
+            ):
+                continue
             skip = 'cherry-pick' in argv and branch_contains(desk, 'HEAD', argv[-1])
             if not skip:
                 try:
                     run(argv if step['env'] is not None else with_git_identity(repo_root, argv),
                         cwd=repo_root, env=step['env'])
                 except SyncwheelError:
+                    if continue_ordinary_empty_desk(
+                        repo_root, manifest, manifest_path, receipt_path, receipt, desk,
+                    ):
+                        continue
                     paths = git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.splitlines()
                     empty = integration_desk_has_exact_empty_step(desk, receipt, step)
                     if not paths and not empty:
@@ -21717,6 +21750,9 @@ class _ReplayRepository:
 
     def stack_content_absorbed_at(self, repo_root, stack, tip):
         return stack_content_absorbed_at(repo_root, stack, tip)
+
+    def ordinary_empty_replay_proofs(self, manifest):
+        return ordinary_empty_replay_proofs(self.root, manifest)
 
     def checkout_reset_destination_lease(self, repo_root, branch, **kwargs):
         return checkout_reset_destination_lease(repo_root, branch, **kwargs)

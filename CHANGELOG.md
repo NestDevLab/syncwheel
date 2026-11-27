@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.53.3 - 2026-11-27
+
+- Resume an already-open ordinary empty cherry-pick from its frozen integration desk receipt. Preserve source recipes, prove the exact owner and prefix under Git locks, retain idempotent ownership evidence across interrupted continuation, and reuse only that exact proof in detached integration replay.
+
 ## 0.53.2 - 2026-11-27
 
 - Confine stack Git and recipe-add worktree recovery to the selected target, including pending intents, terminal registry records and path repairs. Keep unrelated lanes and lock evidence for explicit maintenance.

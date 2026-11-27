@@ -5,6 +5,8 @@ explicit ports. No replay operation reaches into the CLI namespace.
 """
 
 import datetime
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -43,6 +45,158 @@ def normalize_integration_desk_step_phases(manifest, receipt):
         if commit in stack_integration_base_commits(stack):
             raise SyncwheelError('legacy integration desk phase is ambiguous; preserve and review the desk')
         step['integration_only'] = True
+
+
+def ordinary_empty_step_proof(manifest, receipt, desk, git):
+    """Bind one ordinary no-op to its exact frozen owner and replay prefix."""
+    step = receipt['steps'][receipt['next']]
+    argv = step.get('argv') or []
+    stack = stack_map(manifest).get(step.get('stack_id'))
+    if (receipt.get('status') != 'ready' or step.get('integration_only') or not stack
+            or len(argv) != 5 or argv[:4] != ['git', '-C', str(desk), 'cherry-pick']
+            or argv[-1] not in stack_integration_base_commits(stack)
+            or argv[-1] in stack_integration_only_commits(stack)):
+        raise SyncwheelError('ordinary empty desk step has no exact frozen ownership')
+    commit, head = argv[-1], receipt['head']
+    tree = git(desk, 'rev-parse', head + '^{tree}').stdout.strip()
+    if len(git(desk, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) != 2:
+        raise SyncwheelError('ordinary empty desk step requires one source parent')
+    merged = git(desk, 'merge-tree', '--write-tree', f'--merge-base={commit}^',
+                 head, commit, check=False)
+    if merged.returncode or merged.stdout.split() != [tree]:
+        raise SyncwheelError('ordinary desk step is not provably empty on its exact prefix')
+    return {'stack': stack['id'], 'commit': commit, 'head': head, 'tree': tree,
+            'next': receipt['next'],
+            'inputs': {key: value for key, value in receipt['inputs'].items()
+                       if key != 'integration_tip'}}
+
+
+def ordinary_empty_proof_key(proof):
+    return 'integration-ordinary-empty:' + hashlib.sha256(
+        json.dumps(proof, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+@contextlib.contextmanager
+def ordinary_empty_desk_locks(desk, git):
+    """Use Git's locks without replacing the index or moving detached HEAD."""
+    owned = []
+    try:
+        for name in ('index', 'HEAD'):
+            path = Path(git(desk, 'rev-parse', '--path-format=absolute',
+                            '--git-path', name).stdout.strip() + '.lock')
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError as exc:
+                raise SyncwheelError('ordinary empty desk is locked; preserve and retry after its owner') from exc
+            owned.append((path, os.fstat(fd).st_ino))
+            os.close(fd)
+        yield
+    finally:
+        for path, inode in reversed(owned):
+            if path.exists() and path.stat().st_ino == inode:
+                path.unlink()
+
+
+def require_ordinary_empty_desk_state(desk, proof, git, *, resumed=False):
+    """No reset/skip: refuse any work or operation outside the recorded pick."""
+    def ref(name):
+        result = git(desk, 'rev-parse', '--verify', '-q', name, check=False)
+        return result.stdout.strip() if result.returncode == 0 else None
+    marker = ref('CHERRY_PICK_HEAD')
+    flags = git(desk, 'ls-files', '-v', '-z').stdout.split('\0')
+    sequencer = Path(git(desk, 'rev-parse', '--path-format=absolute',
+                         '--git-path', 'sequencer').stdout.strip())
+    if (git(desk, 'symbolic-ref', '-q', 'HEAD', check=False).returncode == 0
+            or ref('HEAD') != proof['head'] or ref('MERGE_HEAD') or ref('REVERT_HEAD')
+            or sequencer.exists() or marker not in ((proof['commit'], None) if resumed else (proof['commit'],))
+            or git(desk, 'status', '--porcelain', '--untracked-files=all',
+                   '--ignored=matching', env={'GIT_OPTIONAL_LOCKS': '0'}).stdout.strip()
+            or any(item and not item.startswith('H ') for item in flags)
+            or git(desk, 'diff', '--cached', '--quiet', proof['head'], check=False).returncode != 0):
+        raise SyncwheelError('ordinary empty desk state changed; preserve its receipt, operations and work')
+    return marker
+
+
+def continue_ordinary_empty_desk_step(repo_root, manifest, manifest_path, receipt_path, receipt, desk,
+                                      *, git, current, write_receipt, append_event):
+    """Finish only the proven pending pick; preserve source recipes and desk HEAD."""
+    step = receipt['steps'][receipt['next']]
+    if step.get('integration_only') or 'cherry-pick' not in step.get('argv', []):
+        return False
+    pending = receipt.get('ordinary_empty_pending')
+    marker_result = git(desk, 'rev-parse', '--verify', '-q', 'CHERRY_PICK_HEAD', check=False)
+    if marker_result.returncode == 0 and marker_result.stdout.strip() != step['argv'][-1]:
+        raise SyncwheelError('ordinary empty desk has a different pending pick; preserve it')
+    if any(git(desk, 'rev-parse', '--verify', '-q', name, check=False).returncode == 0
+           for name in ('MERGE_HEAD', 'REVERT_HEAD')):
+        raise SyncwheelError('ordinary empty desk has an unrelated operation; preserve it')
+    if not pending and marker_result.returncode != 0:
+        return False
+    if not pending and git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.strip():
+        return False
+    preimage = receipt_path.read_bytes()
+    observed = json.loads(preimage)
+    normalize_integration_desk_step_phases(manifest, observed)
+    if observed != receipt:
+        raise SyncwheelError('integration desk receipt changed before ordinary empty continuation')
+    with ordinary_empty_desk_locks(desk, git):
+        proof = ordinary_empty_step_proof(manifest, receipt, desk, git)
+        if pending and pending != proof:
+            raise SyncwheelError('pending ordinary empty proof changed; preserve and review the desk')
+        marker = require_ordinary_empty_desk_state(desk, proof, git, resumed=bool(pending))
+        current()
+        if receipt_path.read_bytes() != preimage:
+            raise SyncwheelError('integration desk receipt changed before ordinary empty continuation')
+        if not pending:
+            receipt['ordinary_empty_pending'] = proof
+            write_receipt(receipt_path, receipt, indent=2)
+        append_event(repo_root, 'integration_ordinary_empty_proven', proof,
+                            manifest_path, idempotency_key=ordinary_empty_proof_key(proof))
+        current()
+        require_ordinary_empty_desk_state(desk, proof, git, resumed=bool(pending))
+        if marker:
+            # CAS deletes only our pseudoref. The real index and HEAD stay locked
+            # and untouched; no reset, skip, abort or sequencer rewrite is needed.
+            git(desk, 'update-ref', '--no-deref', '-d', 'CHERRY_PICK_HEAD', proof['commit'])
+        current()
+        require_ordinary_empty_desk_state(desk, proof, git, resumed=True)
+        receipt.setdefault('ordinary_empty_steps', []).append(proof)
+        receipt.pop('ordinary_empty_pending')
+        receipt['next'] += 1
+        receipt['ordinary_empty_manifest_path'] = str(Path(manifest_path).resolve())
+        write_receipt(receipt_path, receipt, indent=2)
+    return True
+
+
+def load_ordinary_empty_replay_proofs(repo_root, manifest, *, inputs, common_dir, receipt_path, load_events):
+    """Receipt plus append-only ownership evidence, scoped to frozen inputs."""
+    binding = {key: value for key, value in inputs.items() if key != 'integration_tip'}
+    proofs = []
+    for path in (common_dir / 'syncwheel/integration-desks').glob('*.json'):
+        if not re.fullmatch(r'[0-9a-f]{20}', path.stem):
+            continue
+        try:
+            saved = json.loads(path.read_text())
+        except (OSError, ValueError):
+            # An unreadable unrelated desk grants no replay permission.
+            continue
+        manifest_path = saved.get('ordinary_empty_manifest_path')
+        if not manifest_path or path != receipt_path(repo_root, manifest_path):
+            continue
+        candidates = [proof for proof in saved.get('ordinary_empty_steps', [])
+                      if proof['inputs'] == binding]
+        if not candidates:
+            continue
+        events = load_events(repo_root, manifest_path)
+        for proof in candidates:
+            if any(
+                event['type'] == 'integration_ordinary_empty_proven'
+                and event.get('idempotency_key') == ordinary_empty_proof_key(proof)
+                and {key: value for key, value in event['payload'].items()
+                     if key != 'idempotency_key'} == proof for event in events
+            ) and proof not in proofs:
+                proofs.append(proof)
+    return proofs
 
 
 def integration_desk_capture_parent(receipt, stack_id):
@@ -281,6 +435,7 @@ class ReplayRepository(Protocol):
 class ReplayProjection(Protocol):
     def merge_stack_resolution_commits(self, repo_root, stack, stack_ref): ...
     def stack_content_absorbed_at(self, repo_root, stack, tip): ...
+    def ordinary_empty_replay_proofs(self, manifest): ...
 
 
 class ReplayCheckoutLeases(Protocol):
@@ -787,6 +942,8 @@ class ReplayEngine:
             'steps': steps,
             'fallback_from': None,
             'stacks': stacks,
+            'ordinary_empty_proofs': (getattr(self.projection, 'ordinary_empty_replay_proofs', lambda _: [])(manifest)
+                                      if replay_kind == 'integration' else []),
         }
 
     def replay_stacks_touching(self, steps, stack_id, paths):
@@ -867,6 +1024,21 @@ class ReplayEngine:
                         if len(parents) > 1 and self.repository.ref_tree(command_cwd, 'HEAD') == self.repository.ref_tree(repo_root, argv[-1]):
                             continue
                         if self.repository.branch_contains(command_cwd, 'HEAD', argv[-1]):
+                            continue
+                    if (target.get('kind') == 'integration' and not step.get('integration_only')
+                            and 'cherry-pick' in argv and step.get('stack_id')):
+                        command_cwd = git_command_cwd(repo_root, argv)
+                        for proof in plan.get('ordinary_empty_proofs', []):
+                            if (proof['stack'] == step['stack_id'] and proof['commit'] == argv[-1]
+                                    and self.repository.ref_tip(command_cwd, 'HEAD') == proof['head']
+                                    and self.repository.ref_tree(command_cwd, 'HEAD') == proof['tree']):
+                                if require_ordinary_empty_desk_state(
+                                    command_cwd, proof, self.repository.git, resumed=True):
+                                    raise SyncwheelError('unexpected open operation during proven empty replay')
+                                break
+                        else:
+                            proof = None
+                        if proof is not None:
                             continue
                     effective_argv = argv if env is not None else self.repository.with_git_identity(repo_root, argv)
                     if plan.get('checked_projection_trial'):
