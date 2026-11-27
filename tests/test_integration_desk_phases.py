@@ -60,6 +60,9 @@ class IntegrationDeskPhaseTest(unittest.TestCase):
     def test_legacy_cherry_pick_empty_tail_keeps_following_step_and_ownership(self):
         self.check_tail_capture(legacy=True, empty=True)
 
+    def test_legacy_empty_tail_capture_records_missing_ownership_proof(self):
+        self.check_tail_capture(legacy=True, empty=True, missing_empty_marker=True)
+
     def test_legacy_ready_empty_tail_is_recognized_before_capture(self):
         repo, desk, module, path, _, ordinary, _, _, tail, following = self.fixture(empty=True)
         run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk), expected=2)
@@ -124,7 +127,7 @@ class IntegrationDeskPhaseTest(unittest.TestCase):
             module.normalize_integration_desk_step_phases(manifest, receipt)
         self.assertEqual(json.dumps(receipt), before)
 
-    def check_tail_capture(self, legacy, empty=False):
+    def check_tail_capture(self, legacy, empty=False, missing_empty_marker=False):
         repo, desk, module, path, sources, ordinary, producer, consumer, tail, following = self.fixture(empty)
         stopped = run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk), expected=2)
         receipt_path = module.integration_desk_receipt_path(repo, path)
@@ -147,6 +150,9 @@ class IntegrationDeskPhaseTest(unittest.TestCase):
             self.assertIn('resolution desk', stopped.stderr)
             (desk / 'feature.txt').write_text('reviewed tail\n')
             git(desk, 'add', 'feature.txt')
+        if missing_empty_marker:
+            receipt['operation'].pop('empty', None)
+            receipt_path.write_text(json.dumps(receipt) + '\n')
         run_cli(repo, 'stack', 'resolve-integration', 'ordinary', '--worktree', str(desk))
         saved = json.loads(path.read_text())
         stack = next(item for item in saved['stacks'] if item['id'] == 'ordinary')

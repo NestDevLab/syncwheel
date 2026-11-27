@@ -2,7 +2,7 @@
 
 ## 0.53.1 - 2026-11-27
 
-- Preserve the late phase and parent when capturing cherry-pick integration-only resolutions. Recover unambiguous legacy desk phase tags and refuse saved captures with an incompatible parent.
+- Preserve the late phase and parent when capturing cherry-pick integration-only resolutions. Recover unambiguous legacy desk phase tags retain exact empty-tail ownership evidence for legacy receipts, and refuse saved captures with an incompatible parent.
 
 ## 0.53.0 - 2026-11-27
 

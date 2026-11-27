@@ -17816,8 +17816,11 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         if git(desk, 'diff', '--quiet', check=False).returncode != 0:
             raise SyncwheelError('integration resolution desk has unstaged changes; review and stage the complete resolution')
         operation = receipt['operation']
-        if operation.get('empty') and not integration_desk_has_exact_empty_step(desk, receipt, step):
+        exact_empty = integration_desk_has_exact_empty_step(desk, receipt, step)
+        if operation.get('empty') and not exact_empty:
             raise SyncwheelError('empty integration-only desk step changed; preserve and review it')
+        if exact_empty:
+            operation['empty'] = True
         if ref_tip(desk, operation['ref']) != operation['tip']:
             raise SyncwheelError('integration resolution desk operation changed; refusing unrelated resolution')
         tree = git(desk, 'write-tree').stdout.strip()
