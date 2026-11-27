@@ -22,6 +22,34 @@ from syncwheel_manifest import (
     stack_integration_base_commits, stack_integration_only_commits, validate_stack_adoption,
 )
 
+
+def normalize_integration_desk_step_phases(manifest, receipt):
+    """Recover missing legacy phase tags only from unambiguous frozen ownership.
+
+    Completed steps may have been replaced by earlier captures. Inspect only the
+    pending suffix, whose source declarations are still bound by the desk lease.
+    """
+    stacks = stack_map(manifest)
+    for step in receipt['steps'][receipt['next']:]:
+        if 'integration_only' in step:
+            continue
+        argv = step.get('argv') or []
+        stack = stacks.get(step.get('stack_id'))
+        if stack is None or 'cherry-pick' not in argv:
+            continue
+        commit = argv[-1]
+        if commit not in stack_integration_only_commits(stack):
+            continue
+        if commit in stack_integration_base_commits(stack):
+            raise SyncwheelError('legacy integration desk phase is ambiguous; preserve and review the desk')
+        step['integration_only'] = True
+
+
+def integration_desk_capture_parent(receipt, stack_id):
+    step = receipt['steps'][receipt['next']]
+    return receipt['head'] if step.get('integration_only') else receipt['stack_bases'][stack_id]
+
+
 EPHEMERAL_WORKTREE_PLACEHOLDER = '<syncwheel-ephemeral-worktree>'
 
 EMPTY_REPLAY_MESSAGE = (
@@ -707,6 +735,7 @@ class ReplayEngine:
                         self.replay_commit_env(commit),
                         stack_id=stack_id,
                     ))
+                    steps[-1]['integration_only'] = True
         elif integration.get('strategy') == 'merge-stacks':
             stacks_by_id = stacks = stack_map(manifest)
             stack_ref_overrides = target.get('stack_ref_overrides') or {}

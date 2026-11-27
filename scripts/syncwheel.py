@@ -270,6 +270,8 @@ from syncwheel_manifest import (
 from syncwheel_contracts import iso_utc_now, parse_coordination_timestamp
 
 from syncwheel_replay import (
+    normalize_integration_desk_step_phases,
+    integration_desk_capture_parent,
     ReplayEngine,
     replay_hygiene_env,
     requested_replay_mode,
@@ -17756,6 +17758,7 @@ def read_integration_desk(repo_root, manifest, manifest_path, worktree):
         allowed_heads.add(capture['commit'])
     if ref_tip(desk, 'HEAD') not in allowed_heads:
         raise SyncwheelError('integration resolution desk HEAD changed; refusing to capture unrelated work')
+    normalize_integration_desk_step_phases(manifest, receipt)
     return receipt_path, receipt, desk
 
 
@@ -17797,7 +17800,12 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         if receipt.get('status') != 'conflict' or step.get('stack_id') != stack['id']:
             raise SyncwheelError('this stack has no pending conflict in the integration resolution desk')
         capture = receipt.get('capture')
+        parent = integration_desk_capture_parent(receipt, stack['id'])
         if capture and manifest_digest(manifest) == capture['inputs']['manifest']:
+            if capture['commit'] != parent and git(
+                repo_root, 'show', '-s', '--format=%P', capture['commit'],
+            ).stdout.split() != [parent]:
+                raise SyncwheelError('saved integration capture has a different phase parent; preserve and review it')
             finish_integration_desk_capture(
                 repo_root, manifest, manifest_path, receipt_path, receipt, desk,
             )
@@ -17813,8 +17821,6 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         if ref_tip(desk, operation['ref']) != operation['tip']:
             raise SyncwheelError('integration resolution desk operation changed; refusing unrelated resolution')
         tree = git(desk, 'write-tree').stdout.strip()
-        parent = (receipt['head'] if step.get('integration_only')
-                  else receipt['stack_bases'][stack['id']])
         commit = parent
         commits = []
         if tree != ref_tree(repo_root, commit):
