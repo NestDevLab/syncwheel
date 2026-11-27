@@ -276,7 +276,16 @@ class ReplayModesTest(unittest.TestCase):
     def test_guarded_stack_add_refusal_preserves_concurrent_manifest_and_index_edit(self):
         self.check_guarded_stack_add_refusal('manifest')
 
-    def check_guarded_stack_add_refusal(self, peer):
+    def test_guarded_stack_add_relative_manifest_refusal_and_retry(self):
+        self.check_guarded_stack_add_refusal('none', manifest_selection='relative')
+
+    def test_guarded_stack_add_relative_manifest_from_subdirectory(self):
+        self.check_guarded_stack_add_refusal('none', manifest_selection='subdirectory')
+
+    def test_guarded_stack_add_explicit_absolute_manifest_refusal_and_retry(self):
+        self.check_guarded_stack_add_refusal('none', manifest_selection='absolute')
+
+    def check_guarded_stack_add_refusal(self, peer, manifest_selection=None):
         source, manifest, stack_id = build_linear_chain(self.tmp)
         stack = manifest['stacks'][0]
         first, second = stack['commits']
@@ -322,8 +331,18 @@ class ReplayModesTest(unittest.TestCase):
             f'exec "{real_git}" "$@"\n'
         )
         shim.chmod(0o755)
-        add = ('stack', 'add', stack_id, second, '--at-source', second, digest)
-        failed = run_cli(repo, *add, expected=2)
+        selected = ()
+        command_cwd = repo
+        if manifest_selection == 'relative':
+            selected = ('-M', '.syncwheel/manifest.json')
+        elif manifest_selection == 'absolute':
+            selected = ('-M', str(path))
+        elif manifest_selection == 'subdirectory':
+            command_cwd = repo / 'nested'
+            command_cwd.mkdir()
+            selected = ('-M', '../.syncwheel/manifest.json')
+        add = ('stack', 'add', stack_id, second, '--at-source', second, digest, *selected)
+        failed = run_cli(command_cwd, *add, expected=2)
         self.assertIn('injected control commit refusal', failed.stderr)
         self.assertEqual(git(repo, 'rev-parse', 'HEAD').stdout.strip(), head)
         self.assertEqual(git(repo, 'rev-parse', stack['branch']).stdout.strip(), second)
@@ -350,7 +369,7 @@ class ReplayModesTest(unittest.TestCase):
                 self.assertEqual(index.read_bytes(), before_index.read_bytes())
         shim.unlink()
         if peer == 'none':
-            run_cli(repo, *add)
+            run_cli(command_cwd, *add)
             saved = json.loads(git(repo, 'show', 'HEAD:.syncwheel/manifest.json').stdout)
             self.assertEqual(saved['stacks'][0]['commits'], [first, second])
             self.assertFalse(git(repo, 'diff', '--cached', '--name-only').stdout.strip())
@@ -358,7 +377,7 @@ class ReplayModesTest(unittest.TestCase):
             loaded, _ = module.require_manifest(repo)
             self.assertEqual(loaded['stacks'][0]['commits'], [first, second])
         else:
-            run_cli(repo, *add, expected=2)
+            run_cli(command_cwd, *add, expected=2)
 
     def test_guarded_stack_add_never_overwrites_peer_staged_manifest(self):
         for success in (False, True):

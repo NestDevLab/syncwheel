@@ -21,7 +21,16 @@ def _image(path):
 
 
 class GuardedMetadataRollback:
+    @staticmethod
+    def _key(path):
+        path = Path(path)
+        # Resolve aliases in the parent while retaining the final component so
+        # _image still rejects a symlink instead of silently following it.
+        return path.parent.resolve(strict=False) / path.name
+
     def __init__(self, root, manifest_path, git):
+        root = Path(root).resolve(strict=False)
+        manifest_path = self._key(manifest_path)
         self.root = root
         self.git = git
         self.head = git(root, 'rev-parse', 'HEAD').stdout.strip()
@@ -31,6 +40,7 @@ class GuardedMetadataRollback:
         self.index_image_before = _image(self._index_path())
 
     def written(self, path, payload=None):
+        path = self._key(path)
         observed = _image(path)
         # A writer racing the save is never adopted as our rollback preimage.
         mode = self.before[path][1] if self.before[path] is not None else observed[1]
@@ -46,6 +56,14 @@ class GuardedMetadataRollback:
 
     def commit_tracked(self, paths, command, run):
         """Git commit --only uses a private index; peers keep the real one."""
+        desired = {}
+        for relative in paths:
+            path = self._key(self.root / relative)
+            if path not in self.after:
+                raise SyncwheelError(f'guarded metadata image is missing before commit: {relative}')
+            desired[relative] = self.after[path]
+            if _image(path) != desired[relative]:
+                raise SyncwheelError(f'guarded metadata changed before commit: {relative}')
         with tempfile.NamedTemporaryFile(prefix='syncwheel-commit-index-', delete=False) as stream:
             temporary = Path(stream.name)
         temporary.unlink()
@@ -62,7 +80,7 @@ class GuardedMetadataRollback:
             run(command, cwd=self.root, env=environment)
             tip = self.git(self.root, 'rev-parse', 'HEAD').stdout.strip()
             for relative in paths:
-                payload, _ = self.after[self.root / relative]
+                payload, _ = desired[relative]
                 expected = self.git(self.root, 'hash-object', '--stdin', input_text=payload.decode()).stdout.strip()
                 actual = self.git(self.root, 'rev-parse', f'{tip}:{relative}').stdout.strip()
                 if expected != actual:
