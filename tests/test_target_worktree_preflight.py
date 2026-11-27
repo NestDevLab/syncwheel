@@ -178,6 +178,10 @@ class TargetWorktreePreflightTest(unittest.TestCase):
         registry['lanes'] = [lane for lane in registry['lanes'] if lane['id'] != 'pending']
         self.module.save_governed_worktree_registry(self.repo, registry)
         records = copy.deepcopy([lane for lane in registry['lanes'] if lane['id'] in self.foreign])
+        self.module.reconcile_governed_worktrees(
+            self.repo, self.fixture.read_manifest(), candidate_ids=set(),
+            repair_all_paths=True, target_stacks={'feature-a'},
+        )
         self.fixture.run_cli('stack', 'add', 'feature-a', tip)
         registry, _ = self.module.load_governed_worktree_registry(self.repo)
         self.assertEqual([lane for lane in registry['lanes'] if lane['id'] in self.foreign], records)

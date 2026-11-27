@@ -1367,7 +1367,9 @@ class GovernedWorktrees:
             )
             paths_updated = False
             for lane in registry['lanes']:
-                if candidate_ids is not None and lane['id'] not in candidate_ids:
+                # Global maintenance may explicitly repair every moved path; a
+                # selected stack boundary still applies even in that mode.
+                if candidate_ids is not None and lane['id'] not in candidate_ids and not repair_all_paths:
                     continue
                 if target_stacks is not None and lane.get('target') not in target_stacks:
                     continue
