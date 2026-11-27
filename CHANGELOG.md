@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.53.2 - 2026-11-27
+
+- Confine stack Git and recipe-add worktree recovery to the selected target, including pending intents, terminal registry records and path repairs. Keep unrelated lanes and lock evidence for explicit maintenance.
+
 ## 0.53.0 - 2026-11-27
 
 - Place a version 1 draft before an existing integration member. Preserve historical source and resolved projection identities in replay order.

@@ -238,6 +238,17 @@ invalidate it and promotion copies it with the source pins. Shared channels
 refuse draft-stack publication, while ephemeral channels may carry drafts. An
 active-active channel must use the coordination remote.
 
+## Targeted worktree recovery
+
+`stack git --worktree` / `--auto-worktree` and `stack add` limit automatic
+cleanup and ledger recovery to lanes targeting the selected stack. Recovery of
+terminal records, pending intents and moved paths follows the same scope; unrelated
+lanes and retained stale-lock evidence remain unchanged. Capturing a newly owned
+active lane still requires its entire commit set to belong to that stack.
+Use explicit `worktree release` or `gc --apply` for unrelated lifecycle recovery;
+`gc --lane` confines recovery to the named candidates. Real locks, generation
+checks, registry CAS and guarded `stack add --at-source` checks remain enforced.
+
 ## Safety rules
 
 - do not author or commit in the shared primary checkout, even when it is clean;

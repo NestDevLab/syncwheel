@@ -701,6 +701,8 @@ class GovernedWorktrees:
         manifest_path=None,
         *,
         protect_lane=None,
+        candidate_ids=None,
+        target_stacks=None,
     ):
         repo_root = self.repository.root
         ledger = self.governed_worktree_cleanup_ledger(manifest_path)
@@ -712,6 +714,10 @@ class GovernedWorktrees:
             lane_id = payload.get('lane')
             generation = payload.get('generation_token')
             lane = by_id.get(lane_id)
+            if candidate_ids is not None and lane_id not in candidate_ids:
+                continue
+            if target_stacks is not None and (lane is None or lane.get('target') not in target_stacks):
+                continue
             if (
                 lane is not None
                 and not (protect_lane and protect_lane(lane))
@@ -736,6 +742,10 @@ class GovernedWorktrees:
             recorded = payload.get('lane_record')
             generation = payload.get('generation_token')
             if not isinstance(recorded, dict) or not generation:
+                continue
+            if candidate_ids is not None and lane_id not in candidate_ids:
+                continue
+            if target_stacks is not None and recorded.get('target') not in target_stacks:
                 continue
             lane = by_id.get(lane_id)
             if protect_lane and (protect_lane(recorded) or (lane is not None and protect_lane(lane))):
@@ -1338,11 +1348,12 @@ class GovernedWorktrees:
 
     def reconcile_governed_worktrees(
         self, manifest, manifest_path=None, candidate_ids=None, repair_all_paths=False,
-        *, protect_foreign_lanes=False,
+        *, protect_foreign_lanes=False, target_stacks=None,
     ):
         repo_root = self.repository.root
         with self.governed_worktree_registry_lock():
-            self.prune_governed_worktree_stale_locks(manifest_path)
+            if candidate_ids is None and target_stacks is None:
+                self.prune_governed_worktree_stale_locks(manifest_path)
             registry, _ = self.load_governed_worktree_registry()
             persist = self.governed_worktree_registry_cas_persister(registry)
             protect_lane = self.automatic_cleanup_hold() if protect_foreign_lanes else None
@@ -1351,9 +1362,15 @@ class GovernedWorktrees:
                 persist,
                 manifest_path,
                 protect_lane=protect_lane,
+                candidate_ids=candidate_ids,
+                target_stacks=target_stacks,
             )
             paths_updated = False
             for lane in registry['lanes']:
+                if candidate_ids is not None and lane['id'] not in candidate_ids:
+                    continue
+                if target_stacks is not None and lane.get('target') not in target_stacks:
+                    continue
                 if protect_lane and protect_lane(lane):
                     continue
                 status = self.governed_worktree_lane_status(manifest, lane)
@@ -1373,6 +1390,8 @@ class GovernedWorktrees:
             reaped = []
             failures = []
             for lane in list(registry['lanes']):
+                if target_stacks is not None and lane.get('target') not in target_stacks:
+                    continue
                 if lane['id'] not in selected or (protect_lane and protect_lane(lane)):
                     continue
                 completed, detail = self.reap_governed_worktree_lane(
@@ -1429,6 +1448,7 @@ class GovernedWorktrees:
                 persist,
                 manifest_path,
                 protect_lane=hold,
+                target_stacks={stack_id},
             )
             captured = []
             for lane in registry['lanes']:

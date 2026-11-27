@@ -7104,11 +7104,11 @@ def append_governed_worktree_cleanup_event(repo_root, lane, manifest_path=None):
 
 def reconcile_governed_worktrees(
     repo_root, manifest, manifest_path=None, candidate_ids=None, repair_all_paths=False,
-    *, protect_foreign_lanes=False,
+    *, protect_foreign_lanes=False, target_stacks=None,
 ):
     return _governed_worktrees(repo_root).reconcile_governed_worktrees(
         manifest, manifest_path, candidate_ids, repair_all_paths,
-        protect_foreign_lanes=protect_foreign_lanes,
+        protect_foreign_lanes=protect_foreign_lanes, target_stacks=target_stacks,
     )
 
 
@@ -20958,7 +20958,9 @@ def governed_worktree_preflight(args):
         command_stack_rebuild, command_stack_push, command_int_push, command_reconcile,
         command_resume, command_sync, command_publish, command_stack_land, command_stack_close,
     }
-    if args.func == command_stack_add:
+    if args.func == command_stack_git and not governed_worktree_mutation_requested(args):
+        return
+    if args.func in {command_stack_add, command_stack_git}:
         # Capture below handles active lanes whose commits become owned by
         # this stack. Only finish pending cleanups for this stack; unrelated
         # retained copies belong to explicit release/gc.
@@ -20971,7 +20973,7 @@ def governed_worktree_preflight(args):
             return
         cleanup = reconcile_governed_worktrees(
             repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
-            protect_foreign_lanes=True,
+            protect_foreign_lanes=True, target_stacks={args.stack},
         )
     elif governed_worktree_mutation_requested(args):
         # Record moved lane paths and finish cleanups already started, but
