@@ -530,7 +530,11 @@ syncwheel stack add STACK REVIEWED_COMMITS --at-source FULL_SOURCE_TIP MANIFEST_
 Git holds the source ref through the tracked manifest commit. Syncwheel checks
 the reviewed manifest bytes, requires the new commits on the pinned source,
 and verifies that the complete recipe reproduces its tree. If either input
-changed, inspect the new state and review the delta again.
+changed, inspect the new state and review the delta again. If the tracked metadata
+commit is refused, Syncwheel restores its unchanged metadata files and staged
+entries and records a compensating ledger snapshot. The same reviewed command
+can then be retried. Concurrent file or index edits are preserved; inspect them
+before retrying. Lane capture runs only after successful metadata persistence.
 
 ### Ordered historical drafts (version 1, cherry-pick integration)
 

@@ -58,6 +58,7 @@ py-modules = [
   "syncwheel_provenance",
   "syncwheel_projection",
   "syncwheel_integration_history",
+  "syncwheel_guarded_metadata",
 ]
 package-dir = {"" = "scripts"}
 

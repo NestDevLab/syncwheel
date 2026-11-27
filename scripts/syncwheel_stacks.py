@@ -2926,12 +2926,17 @@ class StackLifecycle:
                 'actor': self.repository.governed_worktree_owner(),
             },
         )
-        self.worktrees.capture_governed_worktrees_for_stack(
-            manifest,
-            args.stack,
-            manifest_path=manifest_path,
-        )
-        print(f"{args.stack}: now has {len(stack['commits'])} commits")
+        def capture_after_commit():
+            self.worktrees.capture_governed_worktrees_for_stack(
+                manifest,
+                args.stack,
+                manifest_path=manifest_path,
+            )
+            print(f"{args.stack}: now has {len(stack['commits'])} commits")
+        if getattr(args, 'at_source', None):
+            args._stack_add_after_commit = capture_after_commit
+        else:
+            capture_after_commit()
         return 0
 
 

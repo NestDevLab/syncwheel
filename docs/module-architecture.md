@@ -9,6 +9,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | Module | Responsibility | Dependencies |
 | --- | --- | --- |
 | `syncwheel_manifest_store` | Manifest transactions, lifecycle ledger, durable control commits and crash recovery | Shared transaction state; explicit repository, projection, workspace tracking and lifecycle capabilities |
+| `syncwheel_guarded_metadata` | Refused recipe-commit compensation with file and index ownership checks | Explicit Git port; index semantics and durable file helpers |
 | `syncwheel_manifest` | Manifest normalization, authority, stack dependencies, channel schema | Shared errors; standard library |
 | `syncwheel_coordination` | Snapshot validation, portable refs, proposal comparison and composition | Manifest domain; explicit branch validator |
 | `syncwheel_coordination_state` | Immutable remote state, control-manifest integrity and exclusive ownership evidence | Git observations, manifest inputs and state witnesses |

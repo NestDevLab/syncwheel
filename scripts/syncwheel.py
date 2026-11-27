@@ -4032,6 +4032,8 @@ def ensure_syncwheel_metadata_excluded(repo_root, tracking=None, worktree_root=N
         transaction = _manifest_storage.active_manifest_write_transaction_for_repo(repo_root)
         if gitignore_updated and transaction is not None:
             transaction['gitignoreWritten'] = True
+            if transaction.get('guardedRollback'):
+                transaction['guardedRollback'].written(repo_root / '.gitignore')
         path = git_info_exclude_path(repo_root)
         if path:
             write_managed_block(
@@ -16227,7 +16229,12 @@ def validate_integration_first_base(repo_root, manifest, added_commits):
 def command_stack_add(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    return _stack_lifecycle(repo_root).command_stack_add(args, manifest, manifest_path)
+    result = _stack_lifecycle(repo_root).command_stack_add(args, manifest, manifest_path)
+    callback = getattr(args, '_stack_add_after_commit', None)
+    if callback:
+        transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+        transaction.setdefault('afterCommit', []).append(callback)
+    return result
 
 
 def rebuild_stack_from_manifest(
@@ -19612,7 +19619,13 @@ def commit_git_tracked_manifest(
     ]
     if not relatives:
         return None
+    transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+    rollback = transaction.get('guardedRollback') if transaction else None
+    if rollback:
+        rollback.observe_index(relatives)
     git_add_paths(repo_root, paths, force_paths=[manifest_path])
+    if rollback:
+        rollback.observe_staged_index(relatives)
     changed = git(
         repo_root, 'diff', '--cached', '--quiet', 'HEAD', '--', *relatives, check=False
     )
@@ -21287,6 +21300,9 @@ def stack_add_source_lease(args, repo_root, manifest_path):
     if get_current_branch(repo_root) == stack['branch']:
         raise SyncwheelError('--at-source requires a control checkout separate from the source branch')
     with _StackRepository(repo_root).prepared_ref_transaction([f'verify {ref} {tip}']):
+        from syncwheel_guarded_metadata import GuardedMetadataRollback
+        transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+        transaction['guardedRollback'] = GuardedMetadataRollback(repo_root, manifest_path, git)
         yield
 
 

@@ -264,6 +264,101 @@ class ReplayModesTest(unittest.TestCase):
         saved = json.loads(git(repo, 'show', 'HEAD:.syncwheel/manifest.json').stdout)
         self.assertEqual(saved['stacks'][0]['commits'], [first, second])
 
+    def test_guarded_stack_add_commit_refusal_restores_recipe_and_allows_retry(self):
+        self.check_guarded_stack_add_refusal('none')
+
+    def test_guarded_stack_add_refusal_preserves_concurrent_unrelated_index_edit(self):
+        self.check_guarded_stack_add_refusal('unrelated')
+
+    def test_guarded_stack_add_refusal_preserves_index_edit_before_staged_observation(self):
+        self.check_guarded_stack_add_refusal('before-observation')
+
+    def test_guarded_stack_add_refusal_preserves_concurrent_manifest_and_index_edit(self):
+        self.check_guarded_stack_add_refusal('manifest')
+
+    def check_guarded_stack_add_refusal(self, peer):
+        source, manifest, stack_id = build_linear_chain(self.tmp)
+        stack = manifest['stacks'][0]
+        first, second = stack['commits']
+        stack['commits'] = [first]
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        repo = clone_repo(source, self.tmp / 'refused-add', manifest)
+        path = repo / '.syncwheel/manifest.json'
+        git(repo, 'add', str(path))
+        git(repo, 'commit', '-qm', 'track control recipe')
+        git(repo, 'branch', stack['branch'], second)
+        reviewed = path.read_bytes()
+        head = git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        index = repo / '.git/index'
+        digest = hashlib.sha256(reviewed).hexdigest()
+        real_git = shutil.which('git')
+        peer_script = self.tmp / 'peer.py'
+        peer_script.write_text(
+            'import json, pathlib, subprocess\n'
+            f'p = pathlib.Path({str(path)!r})\n'
+            + ("m = json.loads(p.read_text()); m['stacks'][0]['title'] = 'peer title'; "
+               "p.write_text(json.dumps(m, indent=2) + '\\n')\n"
+               f'subprocess.run([{real_git!r}, "add", str(p)], check=True)\n'
+               if peer == 'manifest' else
+               "pathlib.Path('story.txt').write_text('peer story\\n')\n"
+               f'subprocess.run([{real_git!r}, "add", "story.txt"], check=True)\n'
+               "pathlib.Path('story.txt').write_text('peer story\\npeer unstaged\\n')\n"
+               "pathlib.Path('peer-untracked.txt').write_text('peer untracked\\n')\n"
+               if peer in {'unrelated', 'before-observation'} else 'pass\n')
+        )
+        shim = self.tmp / 'stable-bin/git'
+        before_index = self.tmp / 'before-index'
+        shim.write_text(
+            '#!/bin/sh\n'
+            'case " $* " in *" commit --only "*)\n'
+            + (f'  "{sys.executable}" "{peer_script}" || exit 1\n' if peer != 'before-observation' else '')
+            + '  echo "injected control commit refusal" >&2; exit 1;;\n'
+            'esac\n'
+            # Observe the exact pre-add index after ordinary preflights.
+            f'case " $* " in *" add -f -- .syncwheel/manifest.json "*) cp "{index}" "{before_index}"; ' +
+            (f'"{real_git}" "$@" && "{sys.executable}" "{peer_script}"; exit $?; ' if peer == 'before-observation' else '') +
+            ';; esac\n'
+            f'exec "{real_git}" "$@"\n'
+        )
+        shim.chmod(0o755)
+        add = ('stack', 'add', stack_id, second, '--at-source', second, digest)
+        failed = run_cli(repo, *add, expected=2)
+        self.assertIn('injected control commit refusal', failed.stderr)
+        self.assertEqual(git(repo, 'rev-parse', 'HEAD').stdout.strip(), head)
+        self.assertEqual(git(repo, 'rev-parse', stack['branch']).stdout.strip(), second)
+        module = load_syncwheel_module()
+        events = module.load_ledger_events(repo)
+        rollback = [e for e in events if e.get('payload', {}).get('reason') == 'stack_add_rollback']
+        self.assertEqual(len(rollback), 1)
+        current, _ = module.load_manifest(repo, path)
+        self.assertEqual(rollback[0]['payload']['manifest_hash'], module.manifest_digest(current))
+        self.assertFalse(any(e['type'] == 'worktree_captured' for e in events))
+        if peer == 'manifest':
+            self.assertIn('preserved concurrent edits', failed.stderr)
+            self.assertEqual(json.loads(path.read_bytes())['stacks'][0]['title'], 'peer title')
+            self.assertEqual(git(repo, 'show', ':.syncwheel/manifest.json').stdout, path.read_text())
+        else:
+            self.assertEqual(path.read_bytes(), reviewed)
+            self.assertEqual(git(repo, 'show', ':.syncwheel/manifest.json').stdout, reviewed.decode())
+            if peer in {'unrelated', 'before-observation'}:
+                self.assertEqual(git(repo, 'show', ':story.txt').stdout, 'peer story\n')
+                self.assertEqual((repo / 'story.txt').read_text(), 'peer story\npeer unstaged\n')
+                self.assertEqual((repo / 'peer-untracked.txt').read_text(), 'peer untracked\n')
+            else:
+                # No reconstruction of an unchanged index: preserve its exact bytes.
+                self.assertEqual(index.read_bytes(), before_index.read_bytes())
+        shim.unlink()
+        if peer == 'none':
+            run_cli(repo, *add)
+            saved = json.loads(git(repo, 'show', 'HEAD:.syncwheel/manifest.json').stdout)
+            self.assertEqual(saved['stacks'][0]['commits'], [first, second])
+            self.assertFalse(git(repo, 'diff', '--cached', '--name-only').stdout.strip())
+            # Loading/replaying the ledger must agree with the committed recipe.
+            loaded, _ = module.require_manifest(repo)
+            self.assertEqual(loaded['stacks'][0]['commits'], [first, second])
+        else:
+            run_cli(repo, *add, expected=2)
+
     def test_ephemeral_stack_rebuild_leaves_no_worktree(self):
         source_repo, manifest, stack_id = build_linear_chain(self.tmp)
         clone = clone_repo(source_repo, self.tmp / 'ephemeral-stack', manifest)
