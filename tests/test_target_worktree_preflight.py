@@ -185,6 +185,24 @@ class TargetWorktreePreflightTest(unittest.TestCase):
         self.assertEqual((moved / 'untracked.bin').read_bytes(), b'private wip\x00')
         self.assertTrue(self.stale.exists())
 
+    def test_stack_git_completes_target_pending_cleanup_only(self):
+        selected = self.open('selected', 'feature-a')
+        self.fixture.run_cli_until_cleanup_sigkill(
+            'after_cleanup_intent', 'worktree', 'release', selected['id'],
+            '--reason', 'Interrupted selected release', '--apply', '--json',
+        )
+        self.prepare_foreign_lanes()
+        before = self.snapshot()
+        target = self.fixture.tmp / 'target'
+        self.fixture.run_cli('stack', 'git', 'feature-a', '--worktree', str(target),
+                             '--', 'status', '--short')
+        after = self.snapshot()
+        self.assertEqual(after[:-1], before[:-1])
+        self.assertTrue(set(before[-1].splitlines()).issubset(after[-1].splitlines()))
+        registry, _ = self.module.load_governed_worktree_registry(self.repo)
+        self.assertNotIn(selected['id'], {lane['id'] for lane in registry['lanes']})
+        self.assertFalse(Path(selected['path']).exists())
+
     def test_selected_gc_recovers_only_selected_terminal_and_global_gc_recovers_all(self):
         self.prepare_foreign_lanes()
         registry, _ = self.module.load_governed_worktree_registry(self.repo)
