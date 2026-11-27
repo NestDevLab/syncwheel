@@ -19622,10 +19622,14 @@ def commit_git_tracked_manifest(
     transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
     rollback = transaction.get('guardedRollback') if transaction else None
     if rollback:
-        rollback.observe_index(relatives)
+        return rollback.commit_tracked(
+            relatives,
+            with_git_identity(repo_root, [
+                'git', 'commit', '--only', '-m',
+                'chore(syncwheel): update tracked metadata', '--', *relatives,
+            ]), run,
+        )
     git_add_paths(repo_root, paths, force_paths=[manifest_path])
-    if rollback:
-        rollback.observe_staged_index(relatives)
     changed = git(
         repo_root, 'diff', '--cached', '--quiet', 'HEAD', '--', *relatives, check=False
     )

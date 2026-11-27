@@ -28,10 +28,7 @@ class GuardedMetadataRollback:
         self.object_format = git(root, 'rev-parse', '--show-object-format').stdout.strip()
         self.before = {path: _image(path) for path in (manifest_path, root / '.gitignore')}
         self.after = {}
-        self.index_before = {}
-        self.index_after = {}
-        self.index_image_before = None
-        self.index_image_after = None
+        self.index_image_before = _image(self._index_path())
 
     def written(self, path, payload=None):
         observed = _image(path)
@@ -39,101 +36,83 @@ class GuardedMetadataRollback:
         mode = self.before[path][1] if self.before[path] is not None else observed[1]
         self.after[path] = (payload, mode) if payload is not None else observed
 
-    def _entries(self, paths, env=None):
-        return {path: self.git(self.root, 'ls-files', '--stage', '--', path, env=env).stdout
-                for path in paths}
-
     def _index_path(self):
         raw = self.git(self.root, 'rev-parse', '--git-path', 'index').stdout.strip()
         path = Path(raw)
         return path if path.is_absolute() else self.root / path
 
-    def _snapshot_entries(self, paths, image):
-        with tempfile.NamedTemporaryFile(prefix='syncwheel-observe-index-') as stream:
-            stream.write(image[0])
-            stream.flush()
-            return self._entries(paths, env={'GIT_INDEX_FILE': stream.name})
-
     def _semantics(self, image):
         return parse_index_semantics(image[0], self.object_format)
 
-    def observe_index(self, paths):
-        self.index_image_before = _image(self._index_path())
-        self.index_before = self._snapshot_entries(paths, self.index_image_before)
+    def commit_tracked(self, paths, command, run):
+        """Git commit --only uses a private index; peers keep the real one."""
+        with tempfile.NamedTemporaryFile(prefix='syncwheel-commit-index-', delete=False) as stream:
+            temporary = Path(stream.name)
+        temporary.unlink()
+        environment = {'GIT_INDEX_FILE': str(temporary)}
+        try:
+            self.git(self.root, 'read-tree', 'HEAD', env=environment)
+            self.git(self.root, 'add', '-f', '--', *paths, env=environment)
+            changed = self.git(self.root, 'diff', '--cached', '--quiet', 'HEAD', '--', *paths,
+                               check=False, env=environment)
+            if changed.returncode == 0:
+                return None
+            if changed.returncode != 1:
+                raise SyncwheelError(changed.stderr.strip() or 'could not inspect guarded metadata')
+            run(command, cwd=self.root, env=environment)
+            tip = self.git(self.root, 'rev-parse', 'HEAD').stdout.strip()
+            for relative in paths:
+                payload, _ = self.after[self.root / relative]
+                expected = self.git(self.root, 'hash-object', '--stdin', input_text=payload.decode()).stdout.strip()
+                actual = self.git(self.root, 'rev-parse', f'{tip}:{relative}').stdout.strip()
+                if expected != actual:
+                    raise SyncwheelError('metadata changed during commit; committed and working state preserved for review')
+            self._align_index(paths, tip)
+            return tip
+        finally:
+            temporary.unlink(missing_ok=True)
+            Path(str(temporary) + '.lock').unlink(missing_ok=True)
 
-    def observe_staged_index(self, paths):
-        self.index_image_after = _image(self._index_path())
-        observed = self._snapshot_entries(paths, self.index_image_after)
-        self.index_after = dict(observed)
-        before = self._semantics(self.index_image_before)
-        after = self._semantics(self.index_image_after)
-        self.before_semantics = before
-        self.staged_semantics = after
-        owned = {os.fsencode(path) for path in paths}
-        # Do not adopt an unrelated edit that raced git add and observation.
-        self.exclusive_index_delta = bool(before and after and
-            [entry for entry in before['entries'] if entry[0] not in owned] ==
-            [entry for entry in after['entries'] if entry[0] not in owned] and
-            before['extensions'] == after['extensions'])
-        for relative in paths:
-            path = self.root / relative
-            payload, mode = self.after[path]
-            blob = self.git(self.root, 'hash-object', '--stdin', input_text=payload.decode()).stdout.strip()
-            expected = f"{100755 if mode & 0o111 else 100644} {blob} 0\t{relative}\n"
-            self.index_after[relative] = expected
-            if observed[relative] != expected:
-                # A peer staged this path before observation; do not adopt it.
-                self.index_image_after = None
-
-    def _restore_index(self):
-        if not self.index_after:
-            return []
+    def _align_index(self, paths, tip):
+        """Align only entries unchanged since admission, under Git's index lock."""
         index = self._index_path()
         lock = Path(str(index) + '.lock')
         try:
             descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError as exc:
-            raise SyncwheelError('index is busy; guarded rollback preserved it for inspection') from exc
+            raise SyncwheelError('metadata committed; real index is busy and was preserved for review') from exc
         temporary = None
         try:
             os.close(descriptor)
             image = _image(index)
-            descriptor, name = tempfile.mkstemp(prefix='syncwheel-rollback-index-', dir=index.parent)
+            descriptor, name = tempfile.mkstemp(prefix='syncwheel-align-index-', dir=index.parent)
             temporary = Path(name)
             with os.fdopen(descriptor, 'wb') as stream:
-                stream.write(self.index_image_before[0] if image == self.index_image_after and self.exclusive_index_delta else image[0])
-            if image == self.index_image_after and self.exclusive_index_delta:
-                os.chmod(temporary, self.index_image_before[1])
+                stream.write(image[0])
+            environment = {'GIT_INDEX_FILE': str(temporary)}
+            current = self._semantics(image)
+            before = self._semantics(self.index_image_before)
+            changed = False
+            for relative in paths:
+                raw_path = os.fsencode(relative)
+                original = [entry for entry in before['entries'] if entry[0] == raw_path] if before else None
+                observed = [entry for entry in current['entries'] if entry[0] == raw_path] if current else None
+                if original is None or observed != original or any(entry[4] or entry[5] for entry in original):
+                    continue
+                entry = self.git(self.root, 'ls-tree', tip, '--', relative).stdout
+                mode_object, path = entry.split('\t', 1)
+                mode, _, object_id = mode_object.split()
+                self.git(self.root, 'update-index', '--add', '--cacheinfo',
+                         f'{mode},{object_id},{path.rstrip()}', env=environment)
+                changed = True
+            if changed:
+                if _image(index) != image:
+                    raise SyncwheelError('index changed outside its lock; committed metadata preserved for review')
+                os.chmod(temporary, image[1])
                 with temporary.open('rb') as stream:
                     os.fsync(stream.fileno())
                 os.replace(temporary, index)
                 fsync_directory_path(index.parent)
-                return []
-            environment = {'GIT_INDEX_FILE': str(temporary)}
-            current = self._entries(self.index_after, env=environment)
-            peers = []
-            current_semantics = self._semantics(image)
-            for path, expected in self.index_after.items():
-                owned = os.fsencode(path)
-                entries = lambda parsed: [entry for entry in parsed['entries'] if entry[0] == owned] if parsed else None
-                original = entries(self.before_semantics)
-                flags_changed = (entries(current_semantics) != entries(self.staged_semantics)
-                                 or original is None or any(entry[4] or entry[5] for entry in original))
-                if current[path] != expected or flags_changed:
-                    peers.append('index:' + path)
-                    continue
-                # Remove any stages, then put back the exact original entry.
-                object_id = self.git(self.root, 'hash-object', '--stdin', input_text='').stdout.strip()
-                payload = f"0 {'0' * len(object_id)}\t{path}\n" + self.index_before[path]
-                self.git(self.root, 'update-index', '--index-info', input_text=payload, env=environment)
-            if _image(index) != image:
-                raise SyncwheelError('index changed outside its lock; guarded rollback preserved it')
-            os.chmod(temporary, image[1])
-            with temporary.open('rb') as stream:
-                os.fsync(stream.fileno())
-            os.replace(temporary, index)
-            fsync_directory_path(index.parent)
-            return peers
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -143,7 +122,9 @@ class GuardedMetadataRollback:
     def restore(self):
         if self.git(self.root, 'rev-parse', 'HEAD').stdout.strip() != self.head:
             return 'HEAD changed; metadata preserved for inspection (no rollback applied)'
-        peers = self._restore_index()
+        peers = []
+        if self._semantics(_image(self._index_path())) != self._semantics(self.index_image_before):
+            peers.append("index")
         for path, expected in self.after.items():
             if _image(path) != expected:
                 peers.append('file:' + path.relative_to(self.root).as_posix())
