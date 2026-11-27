@@ -189,6 +189,7 @@ def replay_target(
             'kind': 'stack',
             'stack_id': stack['id'],
             'stack': stack,
+            'expected_tip': expected_tip,
             'worktree': worktree,
             'return_tree': return_tree,
             'skip_contained': skip_contained,
@@ -616,7 +617,12 @@ class ReplayEngine:
         else:
             timestamp = syncwheel_timestamp()
             steps.append(replay_exec_step(['git', 'fetch', '--all', '--prune']))
-            backup = self.backup_branch_command(branch, timestamp)
+            if replay_kind == 'stack' and target.get('expected_tip') is not None:
+                old = target['expected_tip']
+                backup = (['git', 'branch', backup_branch_name(branch, timestamp), old]
+                          if old != ZERO_OBJECT_ID else None)
+            else:
+                backup = self.backup_branch_command(branch, timestamp)
             if backup:
                 steps.append(replay_exec_step(backup))
             if mode == 'plumbing':

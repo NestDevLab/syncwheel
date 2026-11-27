@@ -187,6 +187,39 @@ class ReplayModesTest(unittest.TestCase):
 
         self.assertEqual(git(clone, 'rev-parse', stack['branch']).stdout.strip(), declared)
 
+    def test_create_only_rebuild_preserves_concurrent_writer_with_ref_guard(self):
+        source, manifest, stack_id = build_linear_chain(self.tmp)
+        repo = clone_repo(source, self.tmp / 'create-only', manifest)
+        stack = manifest['stacks'][0]
+        ref = 'refs/heads/' + stack['branch']
+        run_cli(repo, 'hooks', 'install', '--apply')
+        command = ('stack', 'rebuild', stack_id, '--create-only', '--replay-mode', 'plumbing')
+        preview = run_cli(repo, *command, '--dry-run').stdout
+        self.assertIn(f'Create {ref} only if absent', preview)
+        # A real competing write just before the final Git transaction.
+        real_git = shutil.which('git')
+        shim = self.tmp / 'stable-bin/git'
+        shim.write_text(
+            '#!/bin/sh\n'
+            f'if test "$1" = update-ref && test "$2" = --stdin; then\n'
+            f'  "{real_git}" update-ref {ref} {stack["base"]} || exit 1\n'
+            'fi\n'
+            f'exec "{real_git}" "$@"\n'
+        )
+        shim.chmod(0o755)
+        failed = run_cli(repo, *command, expected=2)
+        self.assertIn('already exists', failed.stderr)
+        self.assertEqual(git(repo, 'rev-parse', ref).stdout.strip(), stack['base'])
+        shim.unlink()
+        self.assertIn('absent branch', run_cli(repo, *command, expected=2).stderr)
+        module = load_syncwheel_module()
+        self.assertFalse(any(e['type'] == 'stack_rebuilt' for e in module.load_ledger_events(repo)))
+        git(repo, 'update-ref', '-d', ref, stack['base'])
+        run_cli(repo, *command)
+        events = [e for e in module.load_ledger_events(repo) if e['type'] == 'stack_rebuilt']
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['payload']['after_tip'], git(repo, 'rev-parse', ref).stdout.strip())
+
     def test_ephemeral_stack_rebuild_leaves_no_worktree(self):
         source_repo, manifest, stack_id = build_linear_chain(self.tmp)
         clone = clone_repo(source_repo, self.tmp / 'ephemeral-stack', manifest)

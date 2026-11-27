@@ -2937,9 +2937,18 @@ class StackLifecycle:
         dry_run,
         mode,
         worktree,
+        create_only=False,
     ):
         """Rebuild one stack through the shared replay executor and ledger path."""
         repo_root = self.repository.root
+        expected_tip = None
+        if create_only and mode != 'plumbing':
+            raise SyncwheelError('--create-only requires --replay-mode plumbing')
+        if mode in ('plumbing', 'ephemeral'):
+            source_ref = f"refs/heads/{stack['branch']}"
+            expected_tip = self.repository.ref_tip(repo_root, source_ref) or ZERO_OBJECT_ID
+            if create_only and expected_tip != ZERO_OBJECT_ID:
+                raise SyncwheelError(f'--create-only requires an absent branch: {source_ref}')
         adopted = validate_stack_adoption(stack)
         if adopted:
             current = self.repository.ref_tip(repo_root, stack['branch'])
@@ -2960,13 +2969,26 @@ class StackLifecycle:
             )
         if not dry_run and mode == 'desk':
             self.projections.ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
-        plan = self.replay.replay_plan(manifest, replay_target(stack=stack, worktree=worktree), mode)
-        if not dry_run and mode == 'desk':
-            plan['register_created_desk'] = lambda path: self.projections.register_created_desk(
-                repo_root, manifest_path, stack, path,
-            )
-        result = self.replay.execute_replay(plan, not dry_run)
-        require_replay_success(result)
+        if create_only:
+            print(f"Create {source_ref} only if absent, from {stack['base']} "
+                  f"and {len(stack['commits'])} declared commit(s)")
+            result = {'status': 'planned', 'before_tip': None, 'after_tip': None, 'mode': mode}
+            if not dry_run:
+                tip = self.replay.deterministic_stack_replay_tip(stack['base'], stack['commits'])
+                if not tip:
+                    raise SyncwheelError('cannot materialize the declared source recipe; branch was not created')
+                tip = self.repository.commit_full_sha(repo_root, tip)
+                self.repository.capture_ref_transaction([f'create {source_ref} {tip}'])
+                result.update(status='applied', after_tip=tip)
+        else:
+            target = replay_target(stack=stack, worktree=worktree, expected_tip=expected_tip)
+            plan = self.replay.replay_plan(manifest, target, mode)
+            if not dry_run and mode == 'desk':
+                plan['register_created_desk'] = lambda path: self.projections.register_created_desk(
+                    repo_root, manifest_path, stack, path,
+                )
+            result = self.replay.execute_replay(plan, not dry_run)
+            require_replay_success(result)
         if not dry_run:
             self.ledger.append_ledger_event(
                 repo_root,
@@ -3180,6 +3202,7 @@ class StackLifecycle:
             dry_run=args.dry_run,
             mode=mode,
             worktree=worktree,
+            create_only=args.create_only,
         )
         return 0
 

@@ -4,6 +4,8 @@
 
 - Place a version 1 draft before an existing integration member. Preserve historical source and resolved projection identities in replay order.
 
+- Recover a missing stack source with a create-only ref transaction. Bind plumbing and ephemeral stack rebuilds to the observed destination.
+
 ## 0.52.1 - 2026-11-26
 
 - Honor automatic update mode off before startup refresh, fetch or cache writes. Reuse one settings snapshot per startup, preserve explicit self commands and concurrent configuration writers, and isolate startup decisions in their owning module.

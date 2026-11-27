@@ -1047,6 +1047,10 @@ def build_parser(commands, version):
 
     stack_rebuild_p = stack_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
     stack_rebuild_p.add_argument('stack')
+    stack_rebuild_p.add_argument(
+        '--create-only', action='store_true',
+        help='require a missing source branch and create it atomically in plumbing mode',
+    )
     add_rebuild_args(stack_rebuild_p)
     stack_rebuild_p.set_defaults(func=commands['command_stack_rebuild'])
 

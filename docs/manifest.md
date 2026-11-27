@@ -513,6 +513,12 @@ already assigned to another stack, and updates no Git refs or worktrees. Use
 `stack capture-integration` instead when the commit must also be materialized on
 the stack source branch.
 
+To recover an existing recipe whose source branch must still be absent, use
+`stack rebuild STACK --create-only --replay-mode plumbing`. Preview with
+`--dry-run`. Apply constructs the exact recipe locally, creates the branch
+under a Git ref transaction, and records `stack_rebuilt` on success. It
+refuses a concurrent branch or symbolic ref and never publishes the branch.
+
 ### Ordered historical drafts (version 1, cherry-pick integration)
 
 When a later stack consumes a historical change, insert a non-publishing draft
