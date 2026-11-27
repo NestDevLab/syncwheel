@@ -206,6 +206,7 @@ def draft_create_retry_command(args):
         ('--target-branch', args.target_branch),
         ('--integration-branch', args.integration_branch),
         ('--purpose', args.purpose),
+        ('--before-stack', getattr(args, 'before_stack', None)),
     )
     for flag, value in options:
         if value:
@@ -1356,6 +1357,17 @@ class StackLifecycle:
 
     def command_stack_create(self, args, manifest, manifest_path):
         repo_root = self.repository.root
+        anchor = getattr(args, 'before_stack', None)
+        members = manifest['integration']['stacks']
+        if anchor is not None:
+            if manifest['version'] != 1 or not args.draft:
+                raise SyncwheelError('--before-stack requires a version 1 manifest and --draft')
+            if anchor == args.stack or anchor not in members:
+                raise SyncwheelError(f'expected another existing integration member: {anchor}')
+            if args.stack in stack_map(manifest) and (
+                args.stack not in members or members.index(args.stack) + 1 != members.index(anchor)
+            ):
+                raise SyncwheelError('existing stack does not match the requested integration order')
         if args.draft and coordination_is_active(manifest):
             create_remote = coordination_config(manifest)['remote']
             if not self.intents.coordination_remote_is_reachable(create_remote):
@@ -1438,11 +1450,13 @@ class StackLifecycle:
             require_declared_dependencies=manifest['version'] == MANIFEST_VERSION_CHANNELS,
         )
         integration_membership = manifest['defaults']['integration_membership']
-        if (
+        if anchor is not None:
+            members.insert(members.index(anchor), args.stack)
+        elif (
             integration_membership == INTEGRATION_MEMBERSHIP_REQUIRED
             or args.include_in_integration
-        ) and args.stack not in manifest['integration']['stacks']:
-            manifest['integration']['stacks'].append(args.stack)
+        ) and args.stack not in members:
+            members.append(args.stack)
         coordination_result = None
         operation_token = None
         if args.draft:

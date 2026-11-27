@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.53.0 - 2026-11-27
+
+- Place a version 1 draft before an existing integration member. Preserve historical source and resolved projection identities in replay order.
+
 ## 0.52.1 - 2026-11-26
 
 - Honor automatic update mode off before startup refresh, fetch or cache writes. Reuse one settings snapshot per startup, preserve explicit self commands and concurrent configuration writers, and isolate startup decisions in their owning module.

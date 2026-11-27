@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.52.1`
+Current version: `0.53.0`
 
 Operational private `disabled`, `minimal`, `standard`, `strict` and per-field
 custom preferences are available through

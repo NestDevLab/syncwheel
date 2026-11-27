@@ -513,6 +513,35 @@ already assigned to another stack, and updates no Git refs or worktrees. Use
 `stack capture-integration` instead when the commit must also be materialized on
 the stack source branch.
 
+### Ordered historical drafts (version 1, cherry-pick integration)
+
+When a later stack consumes a historical change, insert a non-publishing draft
+at the reviewed position. Declare the original **source** commits in the draft
+and their corresponding **integration** commits as its resolved projection:
+
+```bash
+syncwheel stack create historical-producer SOURCE --draft --base SOURCE_PARENT --before-stack consumer
+syncwheel stack resolve-integration historical-producer HISTORICAL
+syncwheel int rebuild --dry-run --replay-mode plumbing
+```
+
+Prove each source on the historical parent reproduces the entire historical
+tree. Check the actual replay order and run the complete composition in an
+isolated replica, including later changes to the same paths. A conflict leaves
+composition unqualified. Integration-only classification stays in the final
+replay phase and is appropriate only for changes that can run there.
+
+For a delivered stack whose archive would orphan a historical projection,
+rehearse placing its replacement draft immediately before the delivered stack,
+using the proven source and resolved projection as above. Then preview the
+archive against the updated manifest and apply its exact digest in the replica.
+Do not rebuild between declaring the replacement and retiring the old entry.
+Check that the original source and archive refs survive, the set of unmapped
+commits does not grow, other members retain their relative order, and no patch
+is replayed twice. Check the complete composition and each dependent historical
+parent before applying the rehearsed sequence to shared state. Equal patch IDs
+alone do not establish equivalence.
+
 ### Resolved integration projections
 
 For `merge-stacks`, use the detached [resolution desk workflow](branch-model.md)

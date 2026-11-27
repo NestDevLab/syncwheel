@@ -929,6 +929,10 @@ def build_parser(commands, version):
     stack_create_p.add_argument('-I', '--integration-branch')
     stack_create_p.add_argument('-P', '--purpose')
     stack_create_p.add_argument(
+        '--before-stack', metavar='MEMBER',
+        help='include a new v1 draft immediately before this integration member',
+    )
+    stack_create_p.add_argument(
         '--depends-on', action='append', default=[],
         help='declare one prerequisite stack; may be repeated',
     )

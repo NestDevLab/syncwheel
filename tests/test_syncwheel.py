@@ -4839,6 +4839,22 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             '.syncwheel/manifests/alice.local-ledger/events/0001.jsonl',
         )
 
+    def test_v1_draft_insertion_keeps_existing_order_and_refuses_unknown_anchor(self):
+        path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['defaults']['integration_membership'] = 'required'
+        path.write_text(json.dumps(manifest) + '\n')
+        original = manifest['integration']['stacks']
+        anchor = original[-1]
+        refs = self.git('show-ref', '--heads')
+        self.run_cli('stack', 'create', 'producer', '--draft', '--before-stack', 'absent', expected=2)
+        self.assertEqual(self.read_manifest(), manifest)
+        self.assertEqual(self.git('show-ref', '--heads'), refs)
+        self.run_cli('stack', 'create', 'producer', '--draft', '--before-stack', anchor)
+        updated = self.read_manifest()
+        self.assertEqual(updated['integration']['stacks'], [*original[:-1], 'producer', anchor])
+        self.assertFalse(updated['stacks'][-1]['publication']['enabled'])
+
     def test_stack_create_includes_stack_by_default_when_membership_is_required(self):
         gamma = self.git('rev-parse', 'HEAD')
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'

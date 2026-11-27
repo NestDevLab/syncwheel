@@ -8,6 +8,7 @@ between executions. Do not replace this comparison with source-SHA equality.
 
 import contextlib
 import io
+import json
 import os
 import shutil
 import sys
@@ -199,6 +200,39 @@ class ReplayModesTest(unittest.TestCase):
             if item['type'] == 'stack_rebuilt'
         ][-1]
         self.assertEqual(event['payload']['after_tip'], git(clone, 'rev-parse', 'pr/replay').stdout.strip())
+
+    def test_ordered_history_draft_replays_resolved_commit_before_consumer(self):
+        source, manifest, consumer_id = build_linear_chain(self.tmp)
+        producer, consumer = manifest['stacks'][0]['commits']
+        base = manifest['integration']['base']
+        manifest['stacks'][0]['commits'] = [consumer]
+        repo = clone_repo(source, self.tmp / 'ordered-history', manifest)
+        # Different commit identities, identical source and historical trees.
+        historical = git(repo, 'commit-tree', producer + '^{tree}', '-p', base,
+                         '-m', 'historical projection').stdout.strip()
+        git(repo, 'merge', '--ff-only', historical)
+        git(repo, 'cherry-pick', consumer)
+        expected_blob = git(repo, 'rev-parse', 'HEAD:story.txt').stdout.strip()
+        with (repo / '.git/info/exclude').open('a') as ignore:
+            ignore.write('\n.syncwheel/ledger/\n')
+        git(repo, 'add', '.syncwheel/manifest.json')
+        git(repo, 'commit', '-qm', 'track integration recipe')
+        run_cli(repo, 'stack', 'create', 'history', producer, '--draft', '--base', base,
+                '--before-stack', consumer_id)
+        run_cli(repo, 'stack', 'resolve-integration', 'history', historical)
+        saved = json.loads((repo / '.syncwheel/manifest.json').read_text())
+        history = next(stack for stack in saved['stacks'] if stack['id'] == 'history')
+        self.assertEqual(saved['version'], 1)
+        self.assertEqual(history['commits'], [producer])
+        self.assertEqual(history['integration_commits'], [historical])
+        self.assertFalse(history['publication']['enabled'])
+        git(repo, 'add', '.syncwheel/manifest.json')
+        if git(repo, 'diff', '--cached', '--name-only').stdout.strip():
+            git(repo, 'commit', '-qm', 'record ordered recipe')
+        plan = run_cli(repo, 'int', 'rebuild', '--replay-mode', 'plumbing', '--dry-run').stdout
+        self.assertLess(plan.index('--merge-base=' + historical), plan.index('--merge-base=' + consumer))
+        run_cli(repo, 'int', 'rebuild', '--replay-mode', 'ephemeral')
+        self.assertEqual(git(repo, 'rev-parse', 'integration:story.txt').stdout.strip(), expected_blob)
 
     def test_ephemeral_integration_rebuild_leaves_no_worktree(self):
         source_repo, manifest, _stack_id = build_linear_chain(self.tmp)
