@@ -513,6 +513,61 @@ already assigned to another stack, and updates no Git refs or worktrees. Use
 `stack capture-integration` instead when the commit must also be materialized on
 the stack source branch.
 
+To recover an existing recipe whose source branch must still be absent, use
+`stack rebuild STACK --create-only --replay-mode plumbing`. Preview with
+`--dry-run`. Apply constructs the exact recipe locally, creates the branch
+under a Git ref transaction, and records `stack_rebuilt` on success. It
+refuses a concurrent branch or symbolic ref and never publishes the branch.
+
+After a reviewed fast-forward, use the guarded form to register a recipe
+against that exact result. Record the selected manifest file's SHA-256 at
+review time. Run the command from the control checkout:
+
+```bash
+syncwheel stack add STACK REVIEWED_COMMITS --at-source FULL_SOURCE_TIP MANIFEST_SHA256
+```
+
+Git holds the source ref through the tracked manifest commit. Syncwheel checks
+the reviewed manifest bytes, requires the new commits on the pinned source,
+and verifies that the complete recipe reproduces its tree. If either input
+changed, inspect the new state and review the delta again. If the tracked metadata
+commit is refused, Syncwheel restores its unchanged metadata files and records
+a compensating ledger snapshot. The commit uses a private Git index, so a refusal
+leaves the real index untouched. After success, only entries unchanged since
+admission are aligned under the index lock. The same reviewed command can be
+retried after a complete restore. Concurrent file or index edits are preserved;
+inspect them before retrying. Lane capture runs only after successful metadata
+persistence.
+
+### Ordered historical drafts (version 1, cherry-pick integration)
+
+When a later stack consumes a historical change, insert a non-publishing draft
+at the reviewed position. Declare the original **source** commits in the draft
+and their corresponding **integration** commits as its resolved projection:
+
+```bash
+syncwheel stack create historical-producer SOURCE --draft --base SOURCE_PARENT --before-stack consumer
+syncwheel stack resolve-integration historical-producer HISTORICAL
+syncwheel int rebuild --dry-run --replay-mode plumbing
+```
+
+Prove each source on the historical parent reproduces the entire historical
+tree. Check the actual replay order and run the complete composition in an
+isolated replica, including later changes to the same paths. A conflict leaves
+composition unqualified. Integration-only classification stays in the final
+replay phase and is appropriate only for changes that can run there.
+
+For a delivered stack whose archive would orphan a historical projection,
+rehearse placing its replacement draft immediately before the delivered stack,
+using the proven source and resolved projection as above. Then preview the
+archive against the updated manifest and apply its exact digest in the replica.
+Do not rebuild between declaring the replacement and retiring the old entry.
+Check that the original source and archive refs survive, the set of unmapped
+commits does not grow, other members retain their relative order, and no patch
+is replayed twice. Check the complete composition and each dependent historical
+parent before applying the rehearsed sequence to shared state. Equal patch IDs
+alone do not establish equivalence.
+
 ### Resolved integration projections
 
 For `merge-stacks`, use the detached [resolution desk workflow](branch-model.md)

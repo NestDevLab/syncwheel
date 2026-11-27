@@ -163,6 +163,8 @@ def save_manifest(path, manifest):
                 manifest_digest(persisted) if persisted is not None else None
             )
             transaction['manifestWritten'] = True
+            if transaction.get('guardedRollback'):
+                transaction['guardedRollback'].written(path, payload)
         directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
         try:
             directory_fd = os.open(path.parent, directory_flags)
@@ -1137,6 +1139,22 @@ class ManifestStore:
                         include_manifest=transaction['manifestWritten'],
                         include_gitignore=transaction['gitignoreWritten'],
                     )
+            except SyncwheelError as failure:
+                rollback = transaction.get('guardedRollback')
+                if rollback and transaction['manifestWritten']:
+                    detail = rollback.restore()
+                    current, _ = load_manifest(repo_root, manifest_path)
+                    transaction['expectedDigest'] = manifest_digest(current)
+                    self.append_ledger_event(
+                        repo_root, 'manifest_saved', manifest_event_payload(
+                            manifest_path, current, 'stack_add_rollback', {'detail': detail},
+                        ), manifest_path,
+                    )
+                    raise SyncwheelError(f'{failure}; {detail}') from failure
+                raise
+            else:
+                for callback in transaction.get('afterCommit', ()):
+                    callback()
             finally:
                 transactions.pop(identity, None)
 

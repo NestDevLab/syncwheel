@@ -929,6 +929,10 @@ def build_parser(commands, version):
     stack_create_p.add_argument('-I', '--integration-branch')
     stack_create_p.add_argument('-P', '--purpose')
     stack_create_p.add_argument(
+        '--before-stack', metavar='MEMBER',
+        help='include a new v1 draft immediately before this integration member',
+    )
+    stack_create_p.add_argument(
         '--depends-on', action='append', default=[],
         help='declare one prerequisite stack; may be repeated',
     )
@@ -1025,6 +1029,10 @@ def build_parser(commands, version):
     stack_add_p = stack_sub.add_parser('add', parents=[common])
     stack_add_p.add_argument('stack')
     stack_add_p.add_argument('specs', nargs='+')
+    stack_add_p.add_argument(
+        '--at-source', nargs=2, metavar=('TIP', 'MANIFEST_SHA256'),
+        help='bind recipe registration to an exact source ref and reviewed manifest file bytes',
+    )
     stack_add_p.set_defaults(func=commands['command_stack_add'])
 
     stack_capture_p = stack_sub.add_parser(
@@ -1043,6 +1051,10 @@ def build_parser(commands, version):
 
     stack_rebuild_p = stack_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
     stack_rebuild_p.add_argument('stack')
+    stack_rebuild_p.add_argument(
+        '--create-only', action='store_true',
+        help='require a missing source branch and create it atomically in plumbing mode',
+    )
     add_rebuild_args(stack_rebuild_p)
     stack_rebuild_p.set_defaults(func=commands['command_stack_rebuild'])
 

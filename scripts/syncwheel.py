@@ -4032,6 +4032,8 @@ def ensure_syncwheel_metadata_excluded(repo_root, tracking=None, worktree_root=N
         transaction = _manifest_storage.active_manifest_write_transaction_for_repo(repo_root)
         if gitignore_updated and transaction is not None:
             transaction['gitignoreWritten'] = True
+            if transaction.get('guardedRollback'):
+                transaction['guardedRollback'].written(repo_root / '.gitignore')
         path = git_info_exclude_path(repo_root)
         if path:
             write_managed_block(
@@ -16227,7 +16229,12 @@ def validate_integration_first_base(repo_root, manifest, added_commits):
 def command_stack_add(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    return _stack_lifecycle(repo_root).command_stack_add(args, manifest, manifest_path)
+    result = _stack_lifecycle(repo_root).command_stack_add(args, manifest, manifest_path)
+    callback = getattr(args, '_stack_add_after_commit', None)
+    if callback:
+        transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+        transaction.setdefault('afterCommit', []).append(callback)
+    return result
 
 
 def rebuild_stack_from_manifest(
@@ -19612,6 +19619,16 @@ def commit_git_tracked_manifest(
     ]
     if not relatives:
         return None
+    transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+    rollback = transaction.get('guardedRollback') if transaction else None
+    if rollback:
+        return rollback.commit_tracked(
+            relatives,
+            with_git_identity(repo_root, [
+                'git', 'commit', '--only', '-m',
+                'chore(syncwheel): update tracked metadata', '--', *relatives,
+            ]), run,
+        )
     git_add_paths(repo_root, paths, force_paths=[manifest_path])
     changed = git(
         repo_root, 'diff', '--cached', '--quiet', 'HEAD', '--', *relatives, check=False
@@ -21273,6 +21290,26 @@ def route_stack_add_from_governed_lane(args):
     args.repo = str(primary_root)
 
 
+@contextlib.contextmanager
+def stack_add_source_lease(args, repo_root, manifest_path):
+    """Hold the reviewed source throughout recipe persistence and tracked metadata commit."""
+    tip, manifest_hash = args.at_source
+    if not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', tip) or not re.fullmatch(r'[0-9a-f]{64}', manifest_hash):
+        raise SyncwheelError('--at-source requires a full commit ID and manifest file SHA-256')
+    if hashlib.sha256(manifest_path.read_bytes()).hexdigest() != manifest_hash:
+        raise SyncwheelError('reviewed manifest has changed; inspect it before registering commits')
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    ref = f"refs/heads/{stack['branch']}"
+    if get_current_branch(repo_root) == stack['branch']:
+        raise SyncwheelError('--at-source requires a control checkout separate from the source branch')
+    with _StackRepository(repo_root).prepared_ref_transaction([f'verify {ref} {tip}']):
+        from syncwheel_guarded_metadata import GuardedMetadataRollback
+        transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+        transaction['guardedRollback'] = GuardedMetadataRollback(repo_root, manifest_path, git)
+        yield
+
+
 def main():
     clear_commit_memo()
     parser = build_parser()
@@ -21377,7 +21414,14 @@ def main():
         # stays a decision about the incoming refs and skips the workspace-wide
         # preflights: those inspect other worktrees and must not run there.
         if args.command != 'revision-provider' and not guard_callback:
-            primary_checkout_preflight(args)
+            if args.func == command_stack_create:
+                repo_root, manifest_path = resolve_command_manifest_selection(args)
+                # Observe only completed metadata writes. Release this lock before
+                # acquiring coordination publication locks in the normal pipeline.
+                with channel_mutation_lock(repo_root, manifest_path, 'stack-create-preflight'):
+                    primary_checkout_preflight(args)
+            else:
+                primary_checkout_preflight(args)
             if args.func not in {command_stack_sync, command_stack_capture_integration}:
                 maybe_handle_startup_update_policy(args)
             governed_worktree_preflight(args)
@@ -21390,11 +21434,13 @@ def main():
                     existing_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                     if existing_manifest:
                         ensure_managed_repository_hooks(repo_root, existing_manifest, manifest_path)
-                with manifest_write_transaction(
+                with contextlib.ExitStack() as source_leases, manifest_write_transaction(
                     repo_root, manifest_path, 'manifest-command',
                     commit_tracked_changes=(args.func != command_stack_capture_integration
                                             and not getattr(args, '_metadata_preserve_primary', False)),
                 ):
+                    if args.func == command_stack_add and args.at_source:
+                        source_leases.enter_context(stack_add_source_lease(args, repo_root, manifest_path))
                     primary_root = getattr(args, '_metadata_primary_root', None)
                     if primary_root is not None:
                         selected, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
@@ -22335,6 +22381,13 @@ class _StackRepository:
 
     def capture_ref_transaction(self, operations, authorization=None, *, checked_out_ref=None,
                                 check_prepared=None, fsync_refs=False):
+        with self.prepared_ref_transaction(operations, authorization, checked_out_ref=checked_out_ref,
+                                           fsync_refs=fsync_refs):
+            if check_prepared is not None:
+                check_prepared()
+
+    @contextlib.contextmanager
+    def prepared_ref_transaction(self, operations, authorization=None, *, checked_out_ref=None, fsync_refs=False):
         commands = ['start']
         for operation in operations:
             commands.extend(('option no-deref', operation))
@@ -22377,8 +22430,7 @@ class _StackRepository:
                         self.root, ref.removeprefix('refs/heads/'),
                     ):
                         raise SyncwheelError(f'capture ref is checked out before commit: {ref}')
-                if check_prepared is not None:
-                    check_prepared()
+                yield
                 process.stdin.write('commit\n')
                 process.stdin.flush()
                 require_response('commit: ok')

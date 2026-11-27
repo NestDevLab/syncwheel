@@ -7,6 +7,7 @@ coordination, replay and governed-worktree services through named interfaces.
 
 import contextlib
 import copy
+import functools
 import hashlib
 import json
 import re
@@ -206,6 +207,7 @@ def draft_create_retry_command(args):
         ('--target-branch', args.target_branch),
         ('--integration-branch', args.integration_branch),
         ('--purpose', args.purpose),
+        ('--before-stack', getattr(args, 'before_stack', None)),
     )
     for flag, value in options:
         if value:
@@ -1356,6 +1358,17 @@ class StackLifecycle:
 
     def command_stack_create(self, args, manifest, manifest_path):
         repo_root = self.repository.root
+        anchor = getattr(args, 'before_stack', None)
+        members = manifest['integration']['stacks']
+        if anchor is not None:
+            if manifest['version'] != 1 or not args.draft:
+                raise SyncwheelError('--before-stack requires a version 1 manifest and --draft')
+            if anchor == args.stack or anchor not in members:
+                raise SyncwheelError(f'expected another existing integration member: {anchor}')
+            if args.stack in stack_map(manifest) and (
+                args.stack not in members or members.index(args.stack) + 1 != members.index(anchor)
+            ):
+                raise SyncwheelError('existing stack does not match the requested integration order')
         if args.draft and coordination_is_active(manifest):
             create_remote = coordination_config(manifest)['remote']
             if not self.intents.coordination_remote_is_reachable(create_remote):
@@ -1438,11 +1451,13 @@ class StackLifecycle:
             require_declared_dependencies=manifest['version'] == MANIFEST_VERSION_CHANNELS,
         )
         integration_membership = manifest['defaults']['integration_membership']
-        if (
+        if anchor is not None:
+            members.insert(members.index(anchor), args.stack)
+        elif (
             integration_membership == INTEGRATION_MEMBERSHIP_REQUIRED
             or args.include_in_integration
-        ) and args.stack not in manifest['integration']['stacks']:
-            manifest['integration']['stacks'].append(args.stack)
+        ) and args.stack not in members:
+            members.append(args.stack)
         coordination_result = None
         operation_token = None
         if args.draft:
@@ -2848,6 +2863,7 @@ class StackLifecycle:
                 f"stack {stack['id']} projection failed after adding commits; "
                 f"the stack branch cannot be rebuilt cleanly from the manifest:\n{detail}"
             )
+        return report
 
 
     def validate_integration_first_base(self, manifest, added_commits):
@@ -2892,7 +2908,13 @@ class StackLifecycle:
                     added_commits.append(commit)
         self.validate_integration_first_base(manifest, added_commits)
         stack['commits'] = list(dict.fromkeys(commits))
-        self.validate_stack_update(manifest, stack, previous_commits)
+        report = self.validate_stack_update(manifest, stack, previous_commits)
+        if getattr(args, 'at_source', None):
+            if report['local_tree'] != report['projected_tree']:
+                raise SyncwheelError('proposed recipe does not reproduce the reviewed source tree')
+            if any(not self.repository.branch_contains(repo_root, args.at_source[0], commit)
+                   for commit in added_commits):
+                raise SyncwheelError('added commit is not in the reviewed source history')
         self.control.save_manifest_with_ledger(
             repo_root,
             manifest_path,
@@ -2905,13 +2927,21 @@ class StackLifecycle:
                 'actor': self.repository.governed_worktree_owner(),
             },
         )
-        self.worktrees.capture_governed_worktrees_for_stack(
-            manifest,
-            args.stack,
-            manifest_path=manifest_path,
-        )
-        print(f"{args.stack}: now has {len(stack['commits'])} commits")
+        if getattr(args, 'at_source', None):
+            args._stack_add_after_commit = functools.partial(
+                self.finish_stack_add, manifest, args.stack, manifest_path,
+            )
+        else:
+            self.finish_stack_add(manifest, args.stack, manifest_path)
         return 0
+
+
+    def finish_stack_add(self, manifest, stack_id, manifest_path):
+        self.worktrees.capture_governed_worktrees_for_stack(
+            manifest, stack_id, manifest_path=manifest_path,
+        )
+        stack = require_stack(manifest, stack_id)
+        print(f"{stack_id}: now has {len(stack['commits'])} commits")
 
 
     def rebuild_stack_from_manifest(
@@ -2923,9 +2953,18 @@ class StackLifecycle:
         dry_run,
         mode,
         worktree,
+        create_only=False,
     ):
         """Rebuild one stack through the shared replay executor and ledger path."""
         repo_root = self.repository.root
+        expected_tip = None
+        if create_only and mode != 'plumbing':
+            raise SyncwheelError('--create-only requires --replay-mode plumbing')
+        if mode in ('plumbing', 'ephemeral'):
+            source_ref = f"refs/heads/{stack['branch']}"
+            expected_tip = self.repository.ref_tip(repo_root, source_ref) or ZERO_OBJECT_ID
+            if create_only and expected_tip != ZERO_OBJECT_ID:
+                raise SyncwheelError(f'--create-only requires an absent branch: {source_ref}')
         adopted = validate_stack_adoption(stack)
         if adopted:
             current = self.repository.ref_tip(repo_root, stack['branch'])
@@ -2946,13 +2985,26 @@ class StackLifecycle:
             )
         if not dry_run and mode == 'desk':
             self.projections.ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
-        plan = self.replay.replay_plan(manifest, replay_target(stack=stack, worktree=worktree), mode)
-        if not dry_run and mode == 'desk':
-            plan['register_created_desk'] = lambda path: self.projections.register_created_desk(
-                repo_root, manifest_path, stack, path,
-            )
-        result = self.replay.execute_replay(plan, not dry_run)
-        require_replay_success(result)
+        if create_only:
+            print(f"Create {source_ref} only if absent, from {stack['base']} "
+                  f"and {len(stack['commits'])} declared commit(s)")
+            result = {'status': 'planned', 'before_tip': None, 'after_tip': None, 'mode': mode}
+            if not dry_run:
+                tip = self.replay.deterministic_stack_replay_tip(stack['base'], stack['commits'])
+                if not tip:
+                    raise SyncwheelError('cannot materialize the declared source recipe; branch was not created')
+                tip = self.repository.commit_full_sha(repo_root, tip)
+                self.repository.capture_ref_transaction([f'create {source_ref} {tip}'])
+                result.update(status='applied', after_tip=tip)
+        else:
+            target = replay_target(stack=stack, worktree=worktree, expected_tip=expected_tip)
+            plan = self.replay.replay_plan(manifest, target, mode)
+            if not dry_run and mode == 'desk':
+                plan['register_created_desk'] = lambda path: self.projections.register_created_desk(
+                    repo_root, manifest_path, stack, path,
+                )
+            result = self.replay.execute_replay(plan, not dry_run)
+            require_replay_success(result)
         if not dry_run:
             self.ledger.append_ledger_event(
                 repo_root,
@@ -3166,6 +3218,7 @@ class StackLifecycle:
             dry_run=args.dry_run,
             mode=mode,
             worktree=worktree,
+            create_only=getattr(args, 'create_only', False),
         )
         return 0
 
