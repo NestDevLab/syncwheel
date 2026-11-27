@@ -4802,12 +4802,101 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             ('stack', 'create', 'concurrent-b', '--branch', 'pr/concurrent-b'),
         )
 
-        self.assertEqual([result.returncode for result in results], [0, 0])
+        self.assertEqual([result.returncode for result in results], [0, 0],
+                         [(result.stdout, result.stderr) for result in results])
         self.assertEqual(
             {stack['id'] for stack in self.read_manifest()['stacks']},
             {'feature-a', 'feature-b', 'concurrent-a', 'concurrent-b'},
         )
         self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_stack_create_preflight_waits_for_inflight_tracked_metadata_commit(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply')
+        self.git('commit', '-qm', 'test: finish tracked setup')
+        real_git = shutil.which('git')
+        bin_dir = self.tmp / 'controlled-bin'
+        bin_dir.mkdir()
+        ready, release, observed = (self.tmp / name for name in ('ready', 'release', 'observed'))
+        shim = bin_dir / 'git'
+        shim.write_text(
+            '#!/bin/sh\n'
+            'case " $* " in *" commit --only "*)\n'
+            f' touch "{ready}"; while [ ! -f "{release}" ]; do sleep 0.01; done;;\n'
+            'esac\n'
+            f'exec "{real_git}" "$@"\n'
+        )
+        shim.chmod(0o755)
+        env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+                   SYNCWHEEL_REPO_REGISTRY=str(self.registry))
+        first = subprocess.Popen(
+            ['python3', str(CLI), 'stack', 'create', 'inflight-a', '--branch', 'pr/inflight-a'],
+            cwd=self.repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        second = None
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and first.poll() is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(ready.exists(), 'first create did not reach its tracked commit')
+            # Signal immediately before lock acquisition, then inspect the actual
+            # blocking behavior while the first writer owns the manifest lock.
+            code = (
+                'import contextlib, pathlib, sys\n'
+                f'sys.path.insert(0, {str(CLI.parent)!r})\n'
+                'import syncwheel as sw\n'
+                'original = sw.channel_mutation_lock\n'
+                'publication = sw.coordination_publication_lock_for_command\n'
+                'preflight_held = False\n'
+                '@contextlib.contextmanager\n'
+                'def observed_lock(repo, path, owner):\n'
+                ' global preflight_held\n'
+                f' if owner == "stack-create-preflight": pathlib.Path({str(observed)!r}).touch()\n'
+                ' with original(repo, path, owner) as token:\n'
+                '  preflight_held = owner == "stack-create-preflight"\n'
+                '  try: yield token\n'
+                '  finally: preflight_held = False\n'
+                '@contextlib.contextmanager\n'
+                'def ordered_publication(args):\n'
+                ' assert not preflight_held, "manifest preflight lock held across publication lock"\n'
+                ' with publication(args) as owner: yield owner\n'
+                'sw.channel_mutation_lock = observed_lock\n'
+                'sw.coordination_publication_lock_for_command = ordered_publication\n'
+                'sys.argv = ["syncwheel", "stack", "create", "inflight-b", "--branch", "pr/inflight-b"]\n'
+                'raise SystemExit(sw.main())\n'
+            )
+            second = subprocess.Popen(['python3', '-c', code], cwd=self.repo, env=env,
+                                      text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            deadline = time.monotonic() + 20
+            while not observed.exists() and second.poll() is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(observed.exists(), 'second create did not reach its preflight lock')
+            self.assertIsNone(second.poll(), 'second create refused the in-flight metadata')
+            release.touch()
+            first_out, first_err = first.communicate(timeout=20)
+            second_out, second_err = second.communicate(timeout=20)
+            self.assertEqual([first.returncode, second.returncode], [0, 0],
+                             (first_out, first_err, second_out, second_err))
+            self.assertTrue({'inflight-a', 'inflight-b'}.issubset(
+                {stack['id'] for stack in self.read_manifest()['stacks']}))
+            self.assertEqual(self.git('status', '--porcelain'), '')
+        finally:
+            release.touch()
+            for process in (first, second):
+                if process is not None and process.poll() is None:
+                    process.communicate(timeout=20)
+
+    def test_stack_create_preflight_still_refuses_foreign_staged_content(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply')
+        self.git('commit', '-qm', 'test: finish tracked setup')
+        manifest = (self.repo / '.syncwheel/manifest.json').read_bytes()
+        (self.repo / 'alpha.txt').write_text('peer staged content\n')
+        self.git('add', 'alpha.txt')
+        staged = self.git('rev-parse', ':alpha.txt')
+        result = self.run_cli('stack', 'create', 'refused', '--branch', 'pr/refused', expected=2)
+        self.assertIn('unrelated staged paths: alpha.txt', result.stderr)
+        self.assertEqual(self.git('rev-parse', ':alpha.txt'), staged)
+        self.assertEqual((self.repo / '.syncwheel/manifest.json').read_bytes(), manifest)
+        self.assertNotIn('pr/refused', self.git('branch', '--format=%(refname:short)').splitlines())
 
     def test_reconcile_preflight_allows_modified_syncwheel_paths(self):
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'

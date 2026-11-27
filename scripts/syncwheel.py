@@ -21414,7 +21414,14 @@ def main():
         # stays a decision about the incoming refs and skips the workspace-wide
         # preflights: those inspect other worktrees and must not run there.
         if args.command != 'revision-provider' and not guard_callback:
-            primary_checkout_preflight(args)
+            if args.func == command_stack_create:
+                repo_root, manifest_path = resolve_command_manifest_selection(args)
+                # Observe only completed metadata writes. Release this lock before
+                # acquiring coordination publication locks in the normal pipeline.
+                with channel_mutation_lock(repo_root, manifest_path, 'stack-create-preflight'):
+                    primary_checkout_preflight(args)
+            else:
+                primary_checkout_preflight(args)
             if args.func not in {command_stack_sync, command_stack_capture_integration}:
                 maybe_handle_startup_update_policy(args)
             governed_worktree_preflight(args)
