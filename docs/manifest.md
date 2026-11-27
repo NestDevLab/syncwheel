@@ -610,3 +610,29 @@ recognized only when their pending commit ownership is unambiguous; otherwise
 Syncwheel preserves the desk and refuses capture.
 An empty integration-only resolution requires the exact native ownership proof;
 without it, capture preserves the declaration, receipt and desk for review.
+
+### Ordinary empty picks in an integration desk
+
+An ordinary cherry-pick may already be absorbed by the exact replay prefix even
+though its source commit has separate ownership. Resume the **same** detached
+desk with `syncwheel int rebuild --replay-mode desk --worktree <desk>`; this also
+accepts an older `ready` receipt with its expected `CHERRY_PICK_HEAD` still open.
+The CLI proves the frozen input lease, source owner, exact prefix HEAD and tree,
+a single source parent and a clean, unchanged index/worktree. It refuses foreign
+operations, sequencers, work (including untracked/ignored files), concealed index
+entries, and existing Git locks. It never resets the desk or removes the source
+commit from a recipe.
+
+A write-ahead receipt and idempotent `integration_ordinary_empty_proven` event
+bind the exact stack, commit, prefix and inputs. The CLI clears only the expected
+pseudoref with Git CAS, then advances the same receipt. A retry after either side
+of that CAS completes the same proof once. Native locks left by a killed process
+remain a preservation boundary; they are never stolen automatically.
+
+The final detached integration replay and subsequent identical detached replay
+reuse the completed receipt only alongside its matching ledger evidence and
+frozen inputs, at the **same** prefix HEAD/tree. This is not a general empty-pick
+policy: unproven empty picks still stop, and plumbing replay is unchanged. The
+separate integration-only capture contract and its ownership evidence are
+unchanged. Changing source ownership, projection, order, inputs or prefix
+invalidates this ordinary proof.
