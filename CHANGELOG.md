@@ -4,6 +4,10 @@
 
 - Confine stack Git and recipe-add worktree recovery to the selected target, including pending intents, terminal registry records and path repairs. Keep unrelated lanes and lock evidence for explicit maintenance.
 
+## 0.53.1 - 2026-11-27
+
+- Preserve the late phase and parent when capturing cherry-pick integration-only resolutions. Recover unambiguous legacy desk phase tags retain exact empty-tail ownership evidence for legacy receipts, and refuse unproven empty captures or saved captures with an incompatible parent.
+
 ## 0.53.0 - 2026-11-27
 
 - Place a version 1 draft before an existing integration member. Preserve historical source and resolved projection identities in replay order.

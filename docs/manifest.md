@@ -602,3 +602,11 @@ bound resolution. Verify all peers have upgraded, then enable capture and publis
 the resolution. Older peers deliberately refuse schema 4 and cannot participate
 until upgraded. A saved desk capture can be retried after an interruption without
 creating another resolution commit; changed inputs or desk content still refuse.
+
+For both integration strategies, an integration-only desk resolution stays in the
+late replay phase and uses the current integration prefix as its parent. It does
+not replace the ordinary stack projection. Desks saved without phase tags are
+recognized only when their pending commit ownership is unambiguous; otherwise
+Syncwheel preserves the desk and refuses capture.
+An empty integration-only resolution requires the exact native ownership proof;
+without it, capture preserves the declaration, receipt and desk for review.

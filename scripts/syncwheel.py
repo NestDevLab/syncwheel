@@ -270,6 +270,8 @@ from syncwheel_manifest import (
 from syncwheel_contracts import iso_utc_now, parse_coordination_timestamp
 
 from syncwheel_replay import (
+    normalize_integration_desk_step_phases,
+    integration_desk_capture_parent,
     ReplayEngine,
     replay_hygiene_env,
     requested_replay_mode,
@@ -17756,6 +17758,7 @@ def read_integration_desk(repo_root, manifest, manifest_path, worktree):
         allowed_heads.add(capture['commit'])
     if ref_tip(desk, 'HEAD') not in allowed_heads:
         raise SyncwheelError('integration resolution desk HEAD changed; refusing to capture unrelated work')
+    normalize_integration_desk_step_phases(manifest, receipt)
     return receipt_path, receipt, desk
 
 
@@ -17797,7 +17800,17 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         if receipt.get('status') != 'conflict' or step.get('stack_id') != stack['id']:
             raise SyncwheelError('this stack has no pending conflict in the integration resolution desk')
         capture = receipt.get('capture')
+        parent = integration_desk_capture_parent(receipt, stack['id'])
         if capture and manifest_digest(manifest) == capture['inputs']['manifest']:
+            if (step.get('integration_only') and capture['commit'] == parent
+                    and capture.get('context', {}).get('empty_integration_only') != {
+                        'commit': step['argv'][-1], 'head': parent, 'tree': capture['tree'],
+                    }):
+                raise SyncwheelError('saved empty integration-only capture lacks exact ownership proof; preserve and review it')
+            if capture['commit'] != parent and git(
+                repo_root, 'show', '-s', '--format=%P', capture['commit'],
+            ).stdout.split() != [parent]:
+                raise SyncwheelError('saved integration capture has a different phase parent; preserve and review it')
             finish_integration_desk_capture(
                 repo_root, manifest, manifest_path, receipt_path, receipt, desk,
             )
@@ -17808,16 +17821,20 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         if git(desk, 'diff', '--quiet', check=False).returncode != 0:
             raise SyncwheelError('integration resolution desk has unstaged changes; review and stage the complete resolution')
         operation = receipt['operation']
-        if operation.get('empty') and not integration_desk_has_exact_empty_step(desk, receipt, step):
+        exact_empty = integration_desk_has_exact_empty_step(desk, receipt, step)
+        if operation.get('empty') and not exact_empty:
             raise SyncwheelError('empty integration-only desk step changed; preserve and review it')
+        if exact_empty:
+            operation['empty'] = True
         if ref_tip(desk, operation['ref']) != operation['tip']:
             raise SyncwheelError('integration resolution desk operation changed; refusing unrelated resolution')
         tree = git(desk, 'write-tree').stdout.strip()
-        parent = (receipt['head'] if step.get('integration_only')
-                  else receipt['stack_bases'][stack['id']])
+        parent_tree = ref_tree(repo_root, parent)
+        if step.get('integration_only') and tree == parent_tree and not exact_empty:
+            raise SyncwheelError('empty integration-only resolution lacks exact ownership proof; preserve and review the desk')
         commit = parent
         commits = []
-        if tree != ref_tree(repo_root, commit):
+        if tree != parent_tree:
             commit = git(
                 repo_root, 'commit-tree', tree, '-p', commit,
                 '-m', f"Resolve stack '{stack['id']}' on integration",
