@@ -7,6 +7,7 @@ coordination, replay and governed-worktree services through named interfaces.
 
 import contextlib
 import copy
+import functools
 import hashlib
 import json
 import re
@@ -2926,18 +2927,21 @@ class StackLifecycle:
                 'actor': self.repository.governed_worktree_owner(),
             },
         )
-        def capture_after_commit():
-            self.worktrees.capture_governed_worktrees_for_stack(
-                manifest,
-                args.stack,
-                manifest_path=manifest_path,
-            )
-            print(f"{args.stack}: now has {len(stack['commits'])} commits")
         if getattr(args, 'at_source', None):
-            args._stack_add_after_commit = capture_after_commit
+            args._stack_add_after_commit = functools.partial(
+                self.finish_stack_add, manifest, args.stack, manifest_path,
+            )
         else:
-            capture_after_commit()
+            self.finish_stack_add(manifest, args.stack, manifest_path)
         return 0
+
+
+    def finish_stack_add(self, manifest, stack_id, manifest_path):
+        self.worktrees.capture_governed_worktrees_for_stack(
+            manifest, stack_id, manifest_path=manifest_path,
+        )
+        stack = require_stack(manifest, stack_id)
+        print(f"{stack_id}: now has {len(stack['commits'])} commits")
 
 
     def rebuild_stack_from_manifest(
