@@ -17802,6 +17802,11 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         capture = receipt.get('capture')
         parent = integration_desk_capture_parent(receipt, stack['id'])
         if capture and manifest_digest(manifest) == capture['inputs']['manifest']:
+            if (step.get('integration_only') and capture['commit'] == parent
+                    and capture.get('context', {}).get('empty_integration_only') != {
+                        'commit': step['argv'][-1], 'head': parent, 'tree': capture['tree'],
+                    }):
+                raise SyncwheelError('saved empty integration-only capture lacks exact ownership proof; preserve and review it')
             if capture['commit'] != parent and git(
                 repo_root, 'show', '-s', '--format=%P', capture['commit'],
             ).stdout.split() != [parent]:
@@ -17824,9 +17829,12 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         if ref_tip(desk, operation['ref']) != operation['tip']:
             raise SyncwheelError('integration resolution desk operation changed; refusing unrelated resolution')
         tree = git(desk, 'write-tree').stdout.strip()
+        parent_tree = ref_tree(repo_root, parent)
+        if step.get('integration_only') and tree == parent_tree and not exact_empty:
+            raise SyncwheelError('empty integration-only resolution lacks exact ownership proof; preserve and review the desk')
         commit = parent
         commits = []
-        if tree != ref_tree(repo_root, commit):
+        if tree != parent_tree:
             commit = git(
                 repo_root, 'commit-tree', tree, '-p', commit,
                 '-m', f"Resolve stack '{stack['id']}' on integration",

@@ -63,6 +63,54 @@ class IntegrationDeskPhaseTest(unittest.TestCase):
     def test_legacy_empty_tail_capture_records_missing_ownership_proof(self):
         self.check_tail_capture(legacy=True, empty=True, missing_empty_marker=True)
 
+    def test_legacy_empty_tail_without_exact_proof_preserves_receipt_and_wip(self):
+        repo, desk, module, path, sources, *_ = self.fixture(empty=True)
+        run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk), expected=2)
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        legacy = json.loads(receipt_path.read_text())
+        tail = legacy['operation']['tip']
+        legacy['operation'].pop('empty', None)
+        for step in legacy['steps']:
+            step.pop('integration_only', None)
+        receipt_path.write_text(json.dumps(legacy) + '\n')
+        wip = desk / 'untracked.txt'
+        wip.write_bytes(b'peer work in progress\x00\n')
+        before = (path.read_bytes(), receipt_path.read_bytes(), git(desk, 'ls-files', '--stage').stdout,
+                  git(desk, 'rev-parse', 'HEAD', 'CHERRY_PICK_HEAD').stdout,
+                  len(module.load_ledger_events(repo, path)))
+        failed = run_cli(repo, 'stack', 'resolve-integration', 'ordinary', '--worktree', str(desk), expected=2)
+        self.assertIn('empty integration-only resolution lacks exact ownership proof', failed.stderr)
+        self.assertEqual((path.read_bytes(), receipt_path.read_bytes(), git(desk, 'ls-files', '--stage').stdout,
+                          git(desk, 'rev-parse', 'HEAD', 'CHERRY_PICK_HEAD').stdout,
+                          len(module.load_ledger_events(repo, path))), before)
+        self.assertEqual(wip.read_bytes(), b'peer work in progress\x00\n')
+        self.assertIn(tail, json.loads(path.read_text())['stacks'][0]['integration_only_commits'])
+        for branch, tip in sources.items():
+            self.assertEqual(git(repo, 'rev-parse', branch).stdout.strip(), tip)
+
+    def test_saved_empty_tail_without_ownership_proof_is_not_completed(self):
+        repo, desk, module, path, *_ = self.fixture(empty=True)
+        run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk), expected=2)
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        saved = json.loads(receipt_path.read_text())
+        manifest, _ = module.load_manifest(repo, path)
+        stack = next(item for item in manifest['stacks'] if item['id'] == 'ordinary')
+        stack['integration_only_commits'].pop(0)
+        saved['capture'] = {
+            'commit': saved['head'], 'tree': git(desk, 'write-tree').stdout.strip(),
+            'context': {'stack': 'ordinary', 'commits': [], 'worktree': str(desk)},
+            'inputs': module.integration_desk_inputs(repo, manifest, path),
+        }
+        path.write_text(json.dumps(manifest) + '\n')
+        receipt_path.write_text(json.dumps(saved) + '\n')
+        wip = desk / 'untracked.txt'
+        wip.write_text('peer work in progress\n')
+        before = path.read_bytes(), receipt_path.read_bytes(), git(desk, 'ls-files', '--stage').stdout
+        failed = run_cli(repo, 'stack', 'resolve-integration', 'ordinary', '--worktree', str(desk), expected=2)
+        self.assertIn('saved empty integration-only capture lacks exact ownership proof', failed.stderr)
+        self.assertEqual((path.read_bytes(), receipt_path.read_bytes(), git(desk, 'ls-files', '--stage').stdout), before)
+        self.assertEqual(wip.read_text(), 'peer work in progress\n')
+
     def test_legacy_ready_empty_tail_is_recognized_before_capture(self):
         repo, desk, module, path, _, ordinary, _, _, tail, following = self.fixture(empty=True)
         run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk), expected=2)
