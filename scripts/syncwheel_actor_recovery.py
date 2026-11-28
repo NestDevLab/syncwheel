@@ -387,11 +387,12 @@ def start_merge(root, plan, reference):
 
 
 def preview_merge(root, profile, plan, *, reference, review=None):
-    profile = _live_policy(root, plan)
-    if (profile.get('actor_recovery') is None or 'refs/heads/' + plan['baseBranch']
-            not in profile['actor_recovery'].get('product_refs', {})):
-        return None
+    policy = None
     try:
+        profile = _live_policy(root, plan)
+        policy = profile.get('actor_recovery')
+        if policy is None or 'refs/heads/' + plan['baseBranch'] not in policy.get('product_refs', {}):
+            return None
         store = from_profile(root, profile)
         snapshot, binding = merge_binding(store, profile, plan, reference)
         transition(snapshot['state'], snapshot['authority'], 'prepare', reference, review=review)
@@ -399,7 +400,7 @@ def preview_merge(root, profile, plan, *, reference, review=None):
                 'authority_sha': snapshot['authority_sha'], 'actor': binding['actor'],
                 'policy': profile['actor_recovery']}
     except SyncwheelError as exc:
-        return {'status': 'blocked', 'detail': str(exc), 'policy': profile['actor_recovery']}
+        return {'status': 'blocked', 'detail': str(exc), 'policy': policy}
 
 
 def reconcile_merge(root, profile, plan, *, reference, observation):

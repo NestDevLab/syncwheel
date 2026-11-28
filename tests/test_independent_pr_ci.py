@@ -166,6 +166,7 @@ class IndependentPrCiTest(unittest.TestCase):
                                 f.git('rev-parse', 'HEAD'), (f.repo / '.git/index').read_bytes(),
                                 f.manifest_path.read_bytes(), f.git('status', '--porcelain')))
         self.assertEqual([], list((f.repo / '.syncwheel/ledger').rglob('*')))
+        return plan
 
     def test_missing_pr_returns_blocked_plan_without_effects(self):
         self.observation.update(pr=None, selection={'count': 0})
@@ -178,6 +179,16 @@ class IndependentPrCiTest(unittest.TestCase):
     def test_observation_error_returns_blocked_plan_without_effects(self):
         self.assert_observation_failure_is_read_only(
             'github_observation_failed', error=SW.SyncwheelError('fixture observation failed'))
+
+    def test_recovery_discovery_error_preserves_the_blocked_observation_plan(self):
+        with mock.patch.object(SW._actor_recovery, '_live_policy',
+                               side_effect=SW.SyncwheelError('fixture recovery authority unavailable')):
+            plan = self.assert_observation_failure_is_read_only(
+                'github_observation_failed', error=SW.SyncwheelError('fixture observation failed'))
+        self.assertEqual(plan['actorRecovery'], {
+            'status': 'blocked', 'detail': 'fixture recovery authority unavailable', 'policy': None,
+        })
+        self.assertIn('attributed_delivery_recovery', self.codes(plan))
 
     def test_global_validation_still_requires_the_primary_integration_layout(self):
         self.plan()
