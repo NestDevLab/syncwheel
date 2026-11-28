@@ -5390,19 +5390,49 @@ def observe_acceptance_source(repo_root, source):
         source, trusted_human_ids=_acceptance.trusted_ids(settings, source['repository']), read_json=read_json)
 
 
-def acceptance_merge_evidence(repo_root, head, *, remote, branch, base_sha=None):
-    authority = read_acceptance_authority(repo_root, remote, branch, base_sha=base_sha)
+def acceptance_owner_remote(repo_root, repository):
+    # The private merge policy names the destination repository. Candidate
+    # manifests cannot choose which configured transport owns its requirements.
+    remotes = git(repo_root, 'remote').stdout.splitlines()
+    matches, opaque_origin = [], False
+    for remote in remotes:
+        observed = git(repo_root, 'config', '--get-all', 'remote.' + remote + '.url', check=False)
+        urls = observed.stdout.splitlines() if observed.returncode == 0 else []
+        if len(urls) != 1:
+            continue
+        identity = _acceptance.repository_from_remote(urls[0])
+        # A configured SSH alias is an owner-controlled transport. Its repo
+        # path must still match the independently declared forge destination.
+        if identity is None:
+            alias = re.fullmatch(r'(?:git@[^:/]+:|ssh://git@[^/]+/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?', urls[0])
+            identity = alias.group(1) if alias else None
+        if identity and identity.casefold() == repository.casefold():
+            matches.append(remote)
+        if remote == 'origin' and identity is None:
+            opaque_origin = True
+    if matches:
+        return 'origin' if 'origin' in matches else sorted(matches)[0]
+    # Existing local/offline transports retain their no-opt-in behavior. An
+    # active policy still fails namespace verification below for such a source.
+    if opaque_origin:
+        return 'origin'
+    raise SyncwheelError('cannot identify an owner-controlled transport for the merge repository')
+
+
+def acceptance_merge_evidence(repo_root, head, *, remote, branch, repository, base_sha=None):
+    owner_remote = acceptance_owner_remote(repo_root, repository)
+    authority = read_acceptance_authority(
+        repo_root, owner_remote, branch, base_sha=base_sha if owner_remote == remote else None)
     requirements = authority['requirements']
     if requirements is None:
         return authority, None
-    observed = git(repo_root, 'config', '--get-all', 'remote.' + remote + '.url', check=False)
-    urls = observed.stdout.splitlines() if observed.returncode == 0 else []
-    repository = _acceptance.repository_from_remote(urls[0]) if len(urls) == 1 else None
     result = _acceptance.merge_gates(
         requirements, load_repo_profile(worktree_policy_root(repo_root)), repository=repository,
         head=head, actor=governed_worktree_owner(),
         observe_source=lambda source: observe_acceptance_source(repo_root, source),
         delta_paths=lambda before, after: git(repo_root, 'diff', '--name-status', before, after).stdout.splitlines())
+    if base_sha is not None and authority['base_sha'] != base_sha:
+        result['blockers'].append({'code': 'acceptance_destination_base_mismatch'})
     candidate_blob = git(repo_root, 'rev-parse', head + ':' + ACCEPTANCE_POLICY_PATH, check=False)
     if candidate_blob.returncode or candidate_blob.stdout.strip() != authority['blob_sha']:
         result['blockers'].append({'code': 'acceptance_policy_changed_by_candidate'})
@@ -5418,6 +5448,11 @@ def command_repo_acceptance(args):
             '.syncwheel/profile.local.json', check=False).returncode != 0):
         raise SyncwheelError('acceptance cache must be ignored and untracked')
     repository, shared, remote, branch = acceptance_repository_context(root, getattr(args, 'stack', None))
+    if args.acceptance_action != 'record':
+        merge_policy = github_pr_merge_policy_from_profile(load_repo_profile(root))
+        if merge_policy is not None:
+            repository = merge_policy['repository']
+            remote = acceptance_owner_remote(root, repository)
     requirements = None
     if args.acceptance_action != 'record':
         requirements = read_acceptance_authority(root, remote, branch)['requirements']
@@ -6346,7 +6381,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             acceptance_authority, acceptance_evidence = acceptance_merge_evidence(
                 repo_root, source_revision,
                 remote=stack.get('target_remote') or manifest['defaults']['publication_remote'],
-                branch=base_branch, base_sha=target_base_sha)
+                branch=base_branch, repository=policy['repository'], base_sha=target_base_sha)
         except SyncwheelError as exc:
             github_blocker(blockers, 'acceptance_authority_unavailable', str(exc))
         if acceptance_evidence is not None:
@@ -6553,7 +6588,7 @@ def command_stack_merge_pr(args):
             if ref_tip(repo_root, plan['branch']) != plan['source']['revision']:
                 raise SyncwheelError('acceptance candidate changed before merge; preview again')
         current_acceptance_authority, current_acceptance = acceptance_merge_evidence(
-            repo_root, plan['source']['revision'], remote=plan['targetRemote'], branch=plan['baseBranch'])
+            repo_root, plan['source']['revision'], remote=plan['targetRemote'], branch=plan['baseBranch'], repository=plan['repository'])
         if (current_acceptance != plan.get('acceptanceEvidence')
                 or ((current_acceptance is not None or plan.get('acceptanceEvidence') is not None)
                     and current_acceptance_authority != plan.get('acceptanceAuthority'))):

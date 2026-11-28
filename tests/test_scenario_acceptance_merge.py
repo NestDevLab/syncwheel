@@ -116,7 +116,7 @@ class AcceptanceMergeTest(unittest.TestCase):
         self.f.git('remote', 'set-url', 'origin', 'https://github.com/unrelated/consumer.git')
         result = self.plan()
         self.assertEqual(result['status'], 'blocked')
-        self.assertEqual(result['acceptanceEvidence']['blockers'][0]['code'], 'acceptance_repository_mismatch')
+        self.assertIn('acceptance_authority_unavailable', [b['code'] for b in result['blockers']])
         self.assertEqual(self.source_reads, 0)
         self.f.git('remote', 'set-url', 'origin', 'https://github.com/example/project.git')
         payload = json.loads(self.source.review['body'])
@@ -179,6 +179,22 @@ class AcceptanceMergeTest(unittest.TestCase):
         self.assertEqual(plan['acceptanceEvidence']['scenarios'][0]['status'], 'source_unverified')
         self.assertEqual(plan['acceptanceAuthority']['base_sha'], self.f.base)
         self.assertIsNotNone(plan['acceptanceAuthority']['blob_sha'])
+
+    def test_candidate_cannot_redirect_authority_to_an_unrelated_remote_without_policy(self):
+        fork = self.f.tmp / 'other-destination.git'
+        self.f.git('init', '--bare', '-q', str(fork))
+        old_base = self.f.git('rev-parse', self.f.base + '^')
+        self.f.git('push', '-q', str(fork), old_base + ':refs/heads/main', self.f.head + ':refs/heads/pr/feature')
+        self.f.git('remote', 'add', 'fork', 'https://github.com/unrelated/fork.git')
+        self.f.git('config', 'url.' + str(fork) + '.insteadOf', 'https://github.com/unrelated/fork.git')
+        self.f.manifest['stacks'][0]['target_remote'] = 'fork'
+        self.write_manifest()
+        self.observed['pr']['baseRefOid'] = old_base
+        self.source.review['state'] = 'DISMISSED'
+        plan = self.plan()
+        self.assertEqual(plan['status'], 'blocked')
+        self.assertEqual(plan['acceptanceAuthority']['remote'], 'origin')
+        self.assertIsNotNone(plan['acceptanceEvidence'])
 
     def test_candidate_cannot_remove_protected_owner_policy_blob(self):
         self.f.git('switch', '-q', 'pr/feature')

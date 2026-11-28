@@ -175,10 +175,13 @@ Loss or change of an active requirement invalidates the plan. Policy absence
 keeps the existing flow without a scenario-signoff gate or signoff-source query.
 All existing CI, authority, source identity and dependency checks remain in force.
 
-The source namespace is derived from the one configured URL of the destination
-remote. Supported GitHub HTTPS/SSH URLs identify that namespace; missing,
-ambiguous or unrelated identity cannot satisfy a required signoff. Configuring a
-merge-policy repository string alone does not establish identity. The Git remote
+The independently provisioned private merge policy names the destination
+repository. Its owner-controlled configured Git transport is selected independently
+of the candidate manifest (matching `origin` first, otherwise a stable matching
+transport); choosing another target remote cannot redirect the policy lookup.
+Supported GitHub URLs and configured SSH aliases must match the declared repository
+path. Existing opaque local `origin` transports retain their legacy no-opt-in
+behavior. A destination-base mismatch is a blocker when a policy is active. The Git remote
 configuration is an owner-controlled input, like the executable and credentials,
 not an untrusted candidate declaration. Test fixtures rewrite its transport to a
 local bare repository without contacting a real forge.
