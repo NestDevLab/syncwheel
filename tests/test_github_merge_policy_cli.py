@@ -71,7 +71,8 @@ class MergePolicyCliTest(unittest.TestCase):
                       'merge_method': 'squash', 'allowed_bypasses': [], 'merge_actors': ['reviewer'],
                       'pr_authors': ['author'], 'checks': 'all'}
             observation = {'schemaVersion': 1, 'repository': 'example/project', 'identity': {'login': 'reviewer'},
-                'repositoryInfo': {'permissions': {'admin': True},
+                'repositoryInfo': {'id': 1000, 'permissions': {'admin': True},
+                                   'cloneUrl': str(remote),
                                    'allowMergeMethods': {'squash': True, 'merge': True, 'rebase': True}},
                 'pr': {'number': 1, 'url': 'https://github.com/example/project/pull/1', 'state': 'OPEN',
                        'isDraft': False, 'headRefName': 'pr/feature', 'headRefOid': head, 'baseRefName': 'main',
@@ -82,6 +83,11 @@ class MergePolicyCliTest(unittest.TestCase):
                        'mergeCommit': None},
                 'rules': {'branchProtection': {'required_pull_request_reviews': {'required_approving_review_count': 1}},
                           'rulesets': []}}
+            observation['acceptanceAuthority'] = {
+                'schemaVersion': 1, 'kind': 'githubAcceptanceAuthority', 'host': 'github.com',
+                'repository': {'id': 1000, 'full_name': 'example/project'},
+                'branch': 'main', 'base_sha': base, 'root_tree_sha': git('rev-parse', base + '^{tree}'),
+                'path': '.syncwheel/acceptance-policy.json', 'state': 'absent', 'blob_sha': None, 'content': None}
             adapter = bindir / 'syncwheel-github'
             adapter.write_text('#!/usr/bin/env python3\nimport json,os,sys\njson.load(sys.stdin)\nprint(json.dumps({"ok": True, "observation": json.loads(os.environ["OBSERVATION"])}))\n')
             adapter.chmod(0o755)

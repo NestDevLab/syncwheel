@@ -200,6 +200,7 @@ from syncwheel_ledger import manifest_channel_history_summary
 from syncwheel_adoption_transition import verify_adoption_transition
 
 import syncwheel_publication_intents as _publication_policy
+import syncwheel_actor_recovery as _actor_recovery
 from syncwheel_publication_intents import (
     PublicationIntents,
     COORDINATION_CLAIM_FILE,
@@ -352,6 +353,8 @@ from syncwheel_coordination import (
 import syncwheel_cli as _cli
 import syncwheel_worktree_policy as _worktree_policy
 import syncwheel_execution_policy as _execution_policy
+import syncwheel_acceptance as _acceptance
+import syncwheel_github as _acceptance_github
 import syncwheel_private_json as _private_json
 from syncwheel_contracts import (
     CHANNEL_PLAN_SCHEMA_VERSION,
@@ -676,6 +679,12 @@ def git_command_is_read_only(cmd):
 
 
 def run(cmd, cwd=None, check=True, input_text=None, env=None, authorize=True):
+    push = _actor_recovery.push_command(cmd)
+    if push is not None:
+        # Resolve with the exact caller directory, global Git arguments and
+        # normalized environment that the transport will use, including -C/-c.
+        with _actor_recovery.transport_context(cmd, managed_process_env(env, authorize=False)):
+            _actor_recovery.guard_product_push(Path(cwd or os.getcwd()), {}, push)
     process_env = managed_process_env(
         env, authorize=authorize and not git_command_is_read_only(cmd)
     )
@@ -5337,6 +5346,102 @@ def command_worktree_policy(args):
     )
 
 
+ACCEPTANCE_POLICY_PATH = '.syncwheel/acceptance-policy.json'
+_ACCEPTANCE_AUTHORITY_UNSET = object()
+
+
+def acceptance_repository_context(repo_root, stack_id=None):
+    shared = read_primary_authority_manifest(primary_authority_manifest_path(repo_root)) or {}
+    defaults = shared.get('defaults') or {}
+    stack = require_stack(shared, stack_id) if stack_id else {}
+    remote = stack.get('target_remote') or defaults.get('publication_remote') or defaults.get('canonical_remote', 'origin')
+    branch = stack.get('target_branch') or defaults.get('base_branch', 'main')
+    observed = git(repo_root, 'config', '--get-all', 'remote.' + remote + '.url', check=False)
+    urls = observed.stdout.splitlines() if observed.returncode == 0 else []
+    repository = _acceptance.repository_from_remote(urls[0]) if len(urls) == 1 else None
+    return repository, shared, remote, branch
+
+
+def read_acceptance_authority(repo_root, repository, branch, *, observation=_ACCEPTANCE_AUTHORITY_UNSET,
+                              repository_id=None, base_sha=None):
+    if observation is _ACCEPTANCE_AUTHORITY_UNSET:
+        try:
+            observation = _acceptance_github.observe_acceptance_authority(
+                {'repository': repository, 'baseBranch': branch}, str(repo_root))
+        except _acceptance_github.AdapterError as exc:
+            raise SyncwheelError('acceptance authority verification unavailable: ' + str(exc)) from exc
+    if isinstance(observation, dict) and 'acceptanceAuthority' in observation:
+        observation = observation['acceptanceAuthority']
+    if repository_id is None and isinstance(observation, dict):
+        repository_id = (observation.get('repository') or {}).get('id')
+    authority = _acceptance.normalize_forge_authority(
+        observation, repository=repository, branch=branch, repository_id=repository_id, base_sha=base_sha)
+    if base_sha is not None and git(repo_root, 'rev-parse', base_sha + '^{tree}').stdout.strip() != authority['root_tree_sha']:
+        raise SyncwheelError('authenticated acceptance root tree differs from the merge base')
+    return authority
+
+
+def observe_acceptance_source(repo_root, source):
+    settings = load_private_configuration(get_settings_path(), {})
+    def read_json(endpoint):
+        try:
+            return _acceptance_github.run_json(['api', endpoint], str(repo_root))['value']
+        except _acceptance_github.AdapterError as exc:
+            raise SyncwheelError('cannot verify live acceptance source: ' + str(exc)) from exc
+    return _acceptance.observe_github_signoff(
+        source, trusted_human_ids=_acceptance.trusted_ids(settings, source['repository']), read_json=read_json)
+
+
+def acceptance_merge_evidence(repo_root, head, *, repository, branch,
+                              observation, repository_id, base_sha=None):
+    authority = read_acceptance_authority(
+        repo_root, repository, branch, observation=observation,
+        repository_id=repository_id, base_sha=base_sha)
+    requirements = authority['requirements']
+    if requirements is None:
+        return authority, None
+    result = _acceptance.merge_gates(
+        requirements, load_repo_profile(worktree_policy_root(repo_root)), repository=repository,
+        head=head, actor=governed_worktree_owner(),
+        observe_source=lambda source: observe_acceptance_source(repo_root, source),
+        delta_paths=lambda before, after: git(repo_root, 'diff', '--name-status', before, after).stdout.splitlines())
+    candidate_blob = git(repo_root, 'rev-parse', head + ':' + ACCEPTANCE_POLICY_PATH, check=False)
+    if candidate_blob.returncode or candidate_blob.stdout.strip() != authority['blob_sha']:
+        result['blockers'].append({'code': 'acceptance_policy_changed_by_candidate'})
+    return authority, result
+
+
+def command_repo_acceptance(args):
+    selected_checkout = resolve_repo_root(args.repo)
+    root = worktree_policy_root(selected_checkout)
+    path = checked_repo_profile_path(root)
+    if getattr(args, 'apply', False) and (git_path_is_tracked(root, path) or git(
+            root, 'check-ignore', '--quiet', '--no-index', '--',
+            '.syncwheel/profile.local.json', check=False).returncode != 0):
+        raise SyncwheelError('acceptance cache must be ignored and untracked')
+    repository, shared, remote, branch = acceptance_repository_context(root, getattr(args, 'stack', None))
+    if args.acceptance_action != 'record':
+        merge_policy = github_pr_merge_policy_from_profile(load_repo_profile(root))
+        if merge_policy is not None:
+            repository = merge_policy['repository']
+    requirements = None
+    if args.acceptance_action != 'record':
+        requirements = read_acceptance_authority(root, repository, branch)['requirements']
+    candidate_ref = 'HEAD'
+    if getattr(args, 'stack', None):
+        candidate_ref = require_stack(shared, args.stack)['branch']
+        selected_checkout = root
+    return _acceptance.run_command(
+        args, profile=load_repo_profile(root), write_profile=lambda value: save_repo_profile(root, value),
+        settings=load_private_configuration(get_settings_path(), {}), actor=governed_worktree_owner(),
+        current_head=lambda: git(selected_checkout, 'rev-parse', candidate_ref).stdout.strip(),
+        require_revision=lambda sha: git(root, 'cat-file', '-e', sha + '^{commit}'),
+        read_source=lambda source, trusted: observe_acceptance_source(root, source),
+        delta_paths=lambda before, after: git(root, 'diff', '--name-status', before, after).stdout.splitlines(),
+        repository=repository, requirements=requirements,
+    )
+
+
 def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
     """Validate the clone-local, deliberately narrow GitHub merge policy."""
     if not isinstance(value, dict):
@@ -6015,6 +6120,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         repo_root, manifest, stack, blockers, warnings,
         integration_validation=policy.get('integration', 'required'),
     )
+    acceptance_authority, acceptance_evidence = None, None
     base_branch = stack.get('target_branch') or manifest['defaults']['base_branch']
     if not github_pr_merge_base_allowed(base_branch, policy['base_branches']):
         github_blocker(blockers, 'base_branch_not_allowed', f'base branch is not allowlisted: {base_branch}')
@@ -6284,6 +6390,20 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     warnings.extend({'code': 'primary_projection_not_validated', 'detail': detail,
                      'evidence': {**primary, 'authorization': projection_evidence}}
                     for detail in primary_warnings)
+    if target_base_sha and ref_tip(repo_root, target_base_sha):
+        try:
+            acceptance_authority, acceptance_evidence = acceptance_merge_evidence(
+                repo_root, source_revision, repository=policy['repository'], branch=base_branch,
+                observation=(observation or {}).get('acceptanceAuthority'),
+                repository_id=repository_info.get('id'), base_sha=target_base_sha)
+        except SyncwheelError as exc:
+            github_blocker(blockers, 'acceptance_authority_unavailable', str(exc),
+                           source_error=(observation or {}).get('acceptanceAuthorityError'))
+        if acceptance_evidence is not None:
+            if acceptance_evidence['requirements']['repository'].casefold() != policy['repository'].casefold():
+                github_blocker(blockers, 'acceptance_merge_repository_mismatch', 'merge policy differs from authoritative acceptance repository')
+            for blocker in acceptance_evidence['blockers']:
+                github_blocker(blockers, blocker['code'], 'authoritative scenario acceptance is not applicable', evidence=blocker)
     if not isinstance(pr, dict):
         pr = {}
     number = pr.get('number') or (int(pr_number) if pr_number is not None else None)
@@ -6309,6 +6429,8 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             'headSha': pr.get('headRefOid'),
             'baseSha': pr.get('baseRefOid'),
         },
+        'recoveryRemote': ((observation or {}).get('repositoryInfo') or {}).get('cloneUrl')
+            or 'https://github.com/' + policy['repository'] + '.git',
         'headSha': pr.get('headRefOid'),
         'baseSha': target_base_sha,
         'author': pr.get('author'),
@@ -6330,6 +6452,8 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'executionPolicy': execution_report,
         'operationalPreferencesActive': operational_preferences,
         'candidateEvidence': candidate_evidence,
+        'acceptanceEvidence': acceptance_evidence,
+        'acceptanceAuthority': acceptance_authority,
         'releaseEvidence': _execution_policy.release_status(execution_report, load_repo_profile(worktree_policy_root(repo_root)), source_revision),
         'authority': authority,
         'authorityProvenance': authority_provenance,
@@ -6344,6 +6468,16 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     plan['planDigest'] = github_pr_merge_plan_digest(plan)
     requested = normalize_channel_operation_id(getattr(args, 'operation_id', None))
     plan['operationId'] = requested or 'github-pr-merge-' + plan['planDigest'][:24]
+    recovery = _actor_recovery.preview_merge(
+        repo_root, load_repo_profile(worktree_policy_root(repo_root)), plan,
+        reference=getattr(args, 'actor_publication', None), review=getattr(args, 'actor_review', None))
+    if recovery is not None:
+        plan['actorRecovery'] = recovery
+        if recovery['status'] != 'ready':
+            plan['blockers'].append({'code': 'attributed_delivery_recovery', 'detail': recovery['detail']})
+            plan['status'] = 'blocked'
+            plan['next'] = 'resolve attributed delivery recovery and preview again'
+        plan['planDigest'] = github_pr_merge_plan_digest(plan)
     return plan
 
 
@@ -6460,6 +6594,19 @@ def command_stack_merge_pr(args):
             repo_root, manifest_path, args.operation_id, args.plan_digest,
         )
         if existing:
+            profile = load_repo_profile(worktree_policy_root(repo_root))
+            prepared = next((event['payload']['plan'] for event in reversed(
+                    github_pr_merge_events(repo_root, manifest_path, args.operation_id))
+                    if event['type'] == 'github_pr_merge_prepared'), None)
+            if prepared is not None and prepared.get('actorRecovery') is not None:
+                if prepared is None:
+                    raise SyncwheelError('actor recovery requires original prepared PR evidence')
+                observed = github_adapter_request(repo_root, {
+                    **prepared['adapterRequest'], 'pullRequestNumber': prepared['pullRequest']['number'],
+                })
+                _actor_recovery.reconcile_merge(
+                    repo_root, profile, prepared, reference=getattr(args, 'actor_publication', None),
+                    observation=observed)
             print(json.dumps(existing, indent=2, sort_keys=True))
             return 0 if existing.get('status', '').startswith('succeeded') else 2
     plan = build_github_pr_merge_plan(repo_root, manifest, manifest_path, args.stack, args)
@@ -6478,8 +6625,25 @@ def command_stack_merge_pr(args):
         current_authority = resolve_repository_authority(repo_root, current_manifest, manifest_path)
         if current_authority != (plan['authority'], plan['authorityProvenance']):
             raise SyncwheelError('GitHub PR merge authority changed during observation; preview again')
+        if plan.get('acceptanceEvidence') is not None:
+            if ref_tip(repo_root, plan['branch']) != plan['source']['revision']:
+                raise SyncwheelError('acceptance candidate changed before merge; preview again')
+        live_authority = github_adapter_request(repo_root, {
+            'operation': 'observe_acceptance_authority', 'repository': plan['repository'],
+            'baseBranch': plan['baseBranch']})
+        current_acceptance_authority, current_acceptance = acceptance_merge_evidence(
+            repo_root, plan['source']['revision'], repository=plan['repository'], branch=plan['baseBranch'],
+            observation=live_authority, repository_id=plan['acceptanceAuthority']['repository']['id'],
+            base_sha=plan['baseSha'])
+        if (current_acceptance != plan.get('acceptanceEvidence')
+                or current_acceptance_authority != plan.get('acceptanceAuthority')):
+            raise SyncwheelError('scenario acceptance changed before merge; preview again')
+        _actor_recovery.reserve_merge(
+            repo_root, load_repo_profile(worktree_policy_root(repo_root)), plan,
+            reference=getattr(args, 'actor_publication', None), review=getattr(args, 'actor_review', None))
         record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_started', plan, status='started')
         record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_prepared', plan, status='prepared')
+        _actor_recovery.start_merge(repo_root, plan, getattr(args, 'actor_publication', None))
         merge_result = github_adapter_request(repo_root, {
             'operation': 'merge',
             'repository': plan['repository'],
@@ -6493,12 +6657,37 @@ def command_stack_merge_pr(args):
         'pullRequestNumber': plan['pullRequest']['number'],
     })
     status = github_pr_merge_classify(plan, observed, bool(merge_result.get('ok')))
+    _actor_recovery.reconcile_merge(
+        repo_root, load_repo_profile(worktree_policy_root(repo_root)), plan,
+        reference=getattr(args, 'actor_publication', None), observation=observed)
     receipt = github_pr_merge_receipt(
         repo_root, manifest_path, plan, status, observed, merge_result,
         detail=(merge_result.get('stderr') or merge_result.get('stdout')) if status in {'failed', 'unknown'} else None,
     )
     print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0 if status.startswith('succeeded') else 2
+
+
+def command_actor_recovery(args):
+    root = worktree_policy_root(resolve_repo_root(args.repo))
+    profile = _actor_recovery.repository_profile(root, getattr(args, 'remote', 'origin'))
+    store = _actor_recovery.from_profile(root, profile)
+    if store is None:
+        raise SyncwheelError('actor recovery is not enabled by repository owner configuration')
+    if args.recovery_action == 'reconcile':
+        if not args.apply:
+            result = {'applied': False, 'next': 'apply to read the exact PR outcome and reconcile without a merge retry'}
+        else:
+            result = _actor_recovery.reconcile_reference(
+                root, profile, args.reference, lambda request: github_adapter_request(root, request))
+            result['applied'] = result['status'] != 'unknown'
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get('status') != 'unknown' else 2
+    result = _actor_recovery.run_command(
+        store, args.recovery_action, getattr(args, 'reference', None),
+        apply=getattr(args, 'apply', False))
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
 
 
 def governed_worktree_registry_path(repo_root):
@@ -21406,10 +21595,12 @@ def main():
         or (desk_release and not args.apply)
     )
     try:
-        if args.func == command_worktree_policy:
+        if args.func == command_repo_acceptance:
+            return command_repo_acceptance(args)
+        if args.func in {command_worktree_policy, command_actor_recovery}:
             # Private preferences own no refs or lanes and must be configurable
             # outside a repository, or while an existing lane needs recovery.
-            return command_worktree_policy(args)
+            return args.func(args)
         if args.func in {command_stack_sync, command_stack_absorb}:
             adopted_metadata = True
             observation = _READONLY_DIAGNOSTICS.set(True)
@@ -21630,6 +21821,8 @@ def command_handlers():
         'command_reconcile': command_reconcile,
         'command_replay_mode': command_replay_mode,
         'command_worktree_policy': command_worktree_policy,
+        'command_repo_acceptance': command_repo_acceptance,
+        'command_actor_recovery': command_actor_recovery,
         'command_repo_add': command_repo_add,
         'command_repo_authority_set': command_repo_authority_set,
         'command_repo_authority_status': command_repo_authority_status,

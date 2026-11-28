@@ -28,23 +28,7 @@ class IndependentPrCiTest(unittest.TestCase):
         }
         # Authority is published on the actual target, not invented in the
         # selected working manifest. Incorporate that target without rewriting.
-        f = self.fixture
-        canonical = copy.deepcopy(f.manifest)
-        canonical['stacks'] = []
-        canonical['integration']['stacks'] = []
-        f.manifest_path.write_text(json.dumps(canonical) + '\n')
-        f.git('add', '.syncwheel/manifest.json')
-        f.git('commit', '-qm', 'Publish repository delivery policy')
-        f.base = f.git('rev-parse', 'HEAD')
-        f.git('push', '-q', 'origin', 'main')
-        f.git('switch', '-q', 'pr/feature')
-        f.git('merge', '--no-edit', 'main')
-        previous = f.head
-        f.head = f.git('rev-parse', 'HEAD')
-        f.manifest['stacks'][0]['commits'] = [previous, f.head]
-        f.manifest['stacks'][0]['integration_commits'] = [previous, f.head]
-        f.git('push', '-q', 'origin', 'pr/feature')
-        f.git('switch', '-q', 'main')
+        self.fixture.publish_delivery_policy()
         self.policy = self.fixture.policy()
         self.policy.update(integration='advisory', allowed_bypasses=[])
         self.observation = self.fixture.observation(decision='APPROVED', checks=[{

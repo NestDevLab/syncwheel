@@ -190,3 +190,16 @@ If the command or connection fails after preparation, repeating the same
 operation id and digest reconciles the remote PR without issuing a second
 merge. Receipts distinguish `succeeded`, `succeeded-equivalent`, `failed`, and
 `unknown` and are recorded in the local Syncwheel ledger.
+
+### Scenario authority observation
+
+The fixed adapter also exposes the read-only `observe_acceptance_authority`
+operation. It reads the destination through authenticated `github.com` APIs and
+returns its numeric repository ID, exact live base ref, commit/tree identities
+and the policy blob (or complete-tree proof of absence). Local Git aliases and
+owner/repository path similarity are not authority evidence. Host, repository ID,
+branch, base and policy content must agree with the merge plan, and apply reads
+them again before mutation. Unavailable verification blocks distinctly from
+verified policy absence. This adds no human-signoff requirement when that policy
+is absent. See [scenario acceptance](scenario-acceptance.md) for activation and
+source verification boundaries.

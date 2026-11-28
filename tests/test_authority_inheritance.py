@@ -188,7 +188,8 @@ class AuthorityInheritanceTest(unittest.TestCase):
 
         with (
             mock.patch.object(self.module, 'github_adapter_request',
-                              side_effect=[opened, {'ok': True}, merged]) as adapter,
+                              side_effect=[opened, opened['acceptanceAuthority'],
+                                           {'ok': True}, merged]) as adapter,
             mock.patch.object(self.module, 'github_pr_merge_postverify',
                               return_value={'status': 'verified'}),
         ):
@@ -196,6 +197,9 @@ class AuthorityInheritanceTest(unittest.TestCase):
 
         self.assertEqual(receipt['status'], 'succeeded')
         requests = [call.args[1] for call in adapter.call_args_list]
+        self.assertEqual([request['operation'] for request in requests], [
+            'observe', 'observe_acceptance_authority', 'merge', 'observe',
+        ])
         self.assertEqual(sum(request['operation'] == 'merge' for request in requests), 1)
         after = self.state()
         ledger = after.pop('ledger')
