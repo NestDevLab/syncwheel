@@ -176,7 +176,8 @@ print(json.dumps(value))
         adapter.chmod(0o755); gh.chmod(0o755)
         env=dict(os.environ, PATH=str(bin_dir)+os.pathsep+os.environ['PATH'],
                  ACCEPTANCE_FIXTURE_STATE=str(state_path), ACCEPTANCE_FIXTURE_REMOTE=str(self.f.remote))
-        command=[sys.executable, str(merge_fixture.SCRIPTS/'syncwheel.py'), 'stack', 'merge-pr', 'feature', '--json']
+        entry = os.environ.get('SYNCWHEEL_ACCEPTANCE_TEST_ENTRY') or str(merge_fixture.SCRIPTS/'syncwheel.py')
+        command=[sys.executable, entry, 'stack', 'merge-pr', 'feature', '--json']
         preview=subprocess.run(command,cwd=self.f.repo,env=env,text=True,capture_output=True)
         self.assertEqual(preview.returncode,0,preview.stderr)
         plan=json.loads(preview.stdout)
