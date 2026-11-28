@@ -76,7 +76,9 @@ and the exact revision or revisions covered. The agent assesses the candidate
 delta since those revisions against the accepted scenario. Renew acceptance
 only when the expected behavior changes or the delta's impact on that behavior
 is uncertain. A passing test is evidence for its behavior, not a replacement
-for acceptance of the intended behavior.
+for acceptance of the intended behavior. Use the [scenario acceptance commands](scenario-acceptance.md)
+to record portable provenance, re-observe a supported trusted source and bind
+the agent assessment to an exact candidate. Recording alone verifies no human decision.
 
 Keep replay dependencies and compatibility evidence separate. Use declared
 stack dependencies only when one change requires another to be replayed first;
@@ -125,12 +127,12 @@ independently found responsible. Record the evidence, affected delivery,
 recovery and attribution; do not infer a violation from a warning or an
 unresolved diagnostic alone.
 
-Lane justification, scenario sign-off and acceptance renewal remain workflow
-requirements. Repositories may explicitly enable the
-[native attributed PR recovery gate](actor-recovery.md) for repeat-violation
-review; its configured publication targets, independent authority and residual
-surfaces are part of that opt-in contract. Otherwise repeat review remains a
-workflow requirement. The CLI exposes
+Lane justification remains a workflow requirement. Repositories may explicitly
+enable the [scenario acceptance gate](scenario-acceptance.md) and the
+[native attributed PR recovery gate](actor-recovery.md). Their respective
+source authority, configured scope and residual surfaces remain separate;
+enabling one cannot satisfy or disable the other. Outside these opt-in contracts,
+scenario acceptance and repeat review remain workflow requirements. The CLI exposes
 `worktree open --full` and records lane metadata; it does not determine whether
 the task needed a full lane or whether a person approved its behavior. Use the
 repository's PR, CI and deployment controls for those decisions.

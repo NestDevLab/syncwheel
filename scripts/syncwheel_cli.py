@@ -75,6 +75,35 @@ def add_worktree_policy_parser(parent, commands, *, scope, common=None, name='wo
             parser.add_argument('-a', '--apply', action='store_true')
 
 
+def add_acceptance_parser(parent, commands, common):
+    acceptance = parent.add_parser('acceptance', help='scenario provenance and live source applicability')
+    actions = acceptance.add_subparsers(dest='acceptance_action', required=True)
+    for action in ('record', 'assess', 'status'):
+        parser = actions.add_parser(action, parents=[common])
+        parser.set_defaults(func=commands['command_repo_acceptance'])
+        parser.add_argument('--json', action='store_true')
+        if action == 'record':
+            parser.add_argument('--receipt', action='append', required=True)
+        else:
+            source = parser.add_mutually_exclusive_group(required=True)
+            source.add_argument('--receipt', help='portable scenario acceptance receipt JSON')
+            source.add_argument('--source', help='shared source locator JSON; recover its current decision')
+            source.add_argument('--acceptance-id', help='exact cached receipt digest')
+            parser.add_argument('--stack', help='use the live canonical stack source as candidate')
+            parser.add_argument('--scenario', help='expected exact scenario id')
+            candidate = parser.add_mutually_exclusive_group()
+            candidate.add_argument('--head', help='exact candidate SHA; defaults to checkout HEAD')
+            candidate.add_argument('--candidate', help='exact revisions or ordered composition JSON')
+            if action == 'assess':
+                parser.add_argument('--impact', required=True, choices=('unchanged', 'changed', 'uncertain'))
+                parser.add_argument('--rationale', required=True)
+                parser.add_argument('--reference', required=True)
+            else:
+                parser.add_argument('--assessment', help='exact candidate-bound agent delta assessment JSON')
+        if action != 'status':
+            parser.add_argument('--apply', action='store_true')
+
+
 def add_rebuild_args(parser):
     parser.add_argument('-w', '--worktree')
     parser.add_argument('-i', '--in-place', action='store_true')
@@ -250,6 +279,8 @@ def build_parser(commands, version):
             recovery_action.add_argument('--reference', required=True, help='record ID on independent authority ref')
             recovery_action.add_argument('--apply', action='store_true')
         recovery_action.set_defaults(func=commands['command_actor_recovery'])
+
+    add_acceptance_parser(repo_sub, commands, common)
 
     repo_mode_p = repo_sub.add_parser('mode', help='migrate the repository delivery model')
     repo_mode_sub = repo_mode_p.add_subparsers(dest='mode_command', required=True)
@@ -1370,7 +1401,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         mutates='execute',
         manifest_mutates='update-manifest',
     )
-    register((commands['command_worktree_policy'],), mutates='apply')
+    register((commands['command_worktree_policy'], commands['command_repo_acceptance']), mutates='apply')
     register((commands['command_self_mode'],), mutates='mode')
     register((commands['command_use'],), mutates='profile-selection')
     register((commands['command_replay_mode'],), mutates='mode-or-clear')

@@ -320,11 +320,22 @@ class MergeEntryPointTest(unittest.TestCase):
         args.actor_publication, args.actor_review = binding, review
         merged = self.fixture.observation(state='MERGED', decision='APPROVED')
         merged['pr'].update(mergeCommit='f' * 40, mergedAt='2026-01-01T00:00:00Z')
-        results = [self.fixture.observation(), {'ok': True}, merged]
-        if interruption:
-            results[2] = RuntimeError('lost remote response')
+        observations = 0
+        def response(root, request):
+            nonlocal observations
+            if request['operation'] == 'observe_acceptance_authority':
+                return self.fixture.acceptance_authority()
+            if request['operation'] == 'merge':
+                return {'ok': True}
+            self.assertEqual(request['operation'], 'observe')
+            observations += 1
+            if observations == 1:
+                return self.fixture.observation()
+            if interruption:
+                raise RuntimeError('lost remote response')
+            return merged
         with mock.patch.object(self.app, 'validate_manifest', return_value={'errors': []}), \
-             mock.patch.object(self.app, 'github_adapter_request', side_effect=results), \
+             mock.patch.object(self.app, 'github_adapter_request', side_effect=response), \
              mock.patch.object(self.app, 'github_pr_merge_postverify', return_value={'status': 'verified'}), \
              contextlib.redirect_stdout(io.StringIO()):
             return self.app.command_stack_merge_pr(args)
