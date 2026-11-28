@@ -89,6 +89,8 @@ def add_acceptance_parser(parent, commands, common):
             source.add_argument('--receipt', help='portable scenario acceptance receipt JSON')
             source.add_argument('--source', help='shared source locator JSON; recover its current decision')
             source.add_argument('--acceptance-id', help='exact cached receipt digest')
+            parser.add_argument('--stack', help='use the live canonical stack source as candidate')
+            parser.add_argument('--scenario', help='expected exact scenario id')
             candidate = parser.add_mutually_exclusive_group()
             candidate.add_argument('--head', help='exact candidate SHA; defaults to checkout HEAD')
             candidate.add_argument('--candidate', help='exact revisions or ordered composition JSON')

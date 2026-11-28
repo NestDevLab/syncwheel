@@ -276,8 +276,9 @@ def _read_input(path):
 
 
 def run_command(args, *, profile, write_profile, settings, actor, current_head,
-                require_revision, read_source, delta_paths):
+                require_revision, read_source, delta_paths, repository=None, requirements=None):
     """Public command service; I/O, actor and private profile CAS remain facade ports."""
+    requirements = normalize_requirements(requirements)
     if args.acceptance_action == 'record':
         receipts = [_read_input(name) for name in args.receipt]
         proposed = record_receipts(profile, receipts, actor=actor)
@@ -294,6 +295,8 @@ def run_command(args, *, profile, write_profile, settings, actor, current_head,
         source = normalize_source(_read_input(args.source))
         if source['kind'] != 'github_review':
             raise SyncwheelError('source-only recovery requires a supported shared source owner')
+        if not repository or source['repository'].casefold() != repository.casefold():
+            raise SyncwheelError('acceptance source repository does not match the canonical remote')
         live = read_source(source, trusted_ids(settings, source['repository']))
         receipt = live['receipt']
     elif args.receipt:
@@ -311,32 +314,27 @@ def run_command(args, *, profile, write_profile, settings, actor, current_head,
         if live is not None:
             return live
         if source['kind'] == 'github_review':
+            if not repository or source['repository'].casefold() != repository.casefold():
+                return provenance_observation(receipt)
             return read_source(source, trusted_ids(settings, source['repository']))
         return provenance_observation(receipt)
 
+    actual_head = _sha(current_head())
     candidate = normalize_binding(_read_input(args.candidate)) if args.candidate else {
-        'revisions': [_sha(args.head or current_head())]}
+        'revisions': [_sha(args.head or actual_head)]}
+    heads = candidate.get('revisions', [candidate.get('composition', {}).get('head_sha')])
+    if actual_head not in heads:
+        raise SyncwheelError('acceptance candidate does not match the live checkout or selected stack head')
     for binding in (receipt['binding'], candidate):
         revisions = (binding['revisions'] if 'revisions' in binding else
                      [binding['composition']['base_sha'], binding['composition']['head_sha'],
                       *(s['head_sha'] for s in binding['composition']['stacks'])])
         for revision in revisions:
             require_revision(revision)
-    accepted_head = (receipt['binding']['revisions'][0]
-                     if 'revisions' in receipt['binding'] and len(receipt['binding']['revisions']) == 1
-                     else receipt['binding'].get('composition', {}).get('head_sha'))
-    candidate_head = (candidate['revisions'][0] if 'revisions' in candidate and len(candidate['revisions']) == 1
-                      else candidate.get('composition', {}).get('head_sha'))
-    delta = {'accepted_binding': receipt['binding'], 'candidate_binding': candidate,
-             'paths': delta_paths(accepted_head, candidate_head)
-             if accepted_head and candidate_head else None}
+    delta = candidate_delta(receipt, candidate, delta_paths)
     selected = None
     selected_actor = actor
-    assessments = profile.get('acceptance_assessments', {})
-    if not isinstance(assessments, dict):
-        raise SyncwheelError('acceptance_assessments must be an object')
-    key = hashlib.sha256(json.dumps({'acceptance_id': receipt_id(receipt), 'candidate': candidate},
-                                   sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    key = assessment_key(receipt, candidate)
     if args.acceptance_action == 'assess':
         from datetime import timezone
         selected = {'schema_version': 1, 'kind': 'scenario_assessment',
@@ -345,18 +343,15 @@ def run_command(args, *, profile, write_profile, settings, actor, current_head,
                     'assessed_at': datetime.now(timezone.utc).isoformat(), 'reference': args.reference}
     elif args.assessment:
         selected = _read_input(args.assessment)
-    elif key in assessments:
-        history = assessments[key]
-        if not isinstance(history, list) or not history:
-            raise SyncwheelError('invalid cached acceptance assessment history')
-        stored = history[-1]
-        if not isinstance(stored, dict) or set(stored) != {'assessment', 'actor', 'delta'}:
-            raise SyncwheelError('invalid cached acceptance assessment')
-        selected, selected_actor = stored['assessment'], stored['actor']
-        if stored['delta'] != delta:
-            raise SyncwheelError('cached candidate delta changed; assess it again')
+    else:
+        stored = cached_assessment(profile, receipt, candidate, delta)
+        if stored:
+            selected, selected_actor = stored['assessment'], stored['actor']
+    def observe_bound(source):
+        return source_context_observation(receipt, observe(source), repository=repository,
+                                          requirements=requirements, scenario=args.scenario)
     result = applicability(receipt, candidate, actor=selected_actor, assessment=selected,
-                           observe_source=observe)
+                           observe_source=observe_bound)
     result.update(receipt=receipt, delta=delta, applied=False)
     if args.acceptance_action == 'assess' and args.apply:
         proposed = record_receipts(profile, [receipt], actor=actor)
@@ -368,3 +363,111 @@ def run_command(args, *, profile, write_profile, settings, actor, current_head,
         result['applied'] = True
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result['status'] == 'applicable' else 1
+
+
+def repository_from_remote(url):
+    """Derive GitHub namespace from the observed canonical remote, not receipt data."""
+    if not isinstance(url, str):
+        return None
+    match = re.fullmatch(r'(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?', url.strip())
+    return match.group(1) if match else None
+
+
+def normalize_requirements(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {'repository', 'scenarios'}:
+        raise SyncwheelError('canonical scenario_acceptance requires repository and scenarios')
+    repository = value['repository']
+    if not isinstance(repository, str) or not REPOSITORY.fullmatch(repository):
+        raise SyncwheelError('invalid canonical scenario acceptance repository')
+    if not isinstance(value['scenarios'], list) or not value['scenarios']:
+        raise SyncwheelError('canonical scenario acceptance requires non-empty scenarios')
+    scenarios, seen = [], set()
+    for item in value['scenarios']:
+        if not isinstance(item, dict) or set(item) != {'id', 'source'}:
+            raise SyncwheelError('canonical acceptance scenario requires id and source')
+        scenario = _text(item['id'], 'required scenario id')
+        source = normalize_source(item['source'])
+        if scenario in seen or source['kind'] != 'github_review' or source['repository'].casefold() != repository.casefold():
+            raise SyncwheelError('invalid or duplicate canonical acceptance source/scenario')
+        seen.add(scenario)
+        scenarios.append({'id': scenario, 'source': source})
+    return {'repository': repository, 'scenarios': scenarios}
+
+
+def candidate_delta(receipt, candidate, delta_paths):
+    accepted = receipt['binding']
+    before = accepted['revisions'][0] if 'revisions' in accepted and len(accepted['revisions']) == 1 else accepted.get('composition', {}).get('head_sha')
+    after = candidate['revisions'][0] if 'revisions' in candidate and len(candidate['revisions']) == 1 else candidate.get('composition', {}).get('head_sha')
+    return {'accepted_binding': accepted, 'candidate_binding': candidate,
+            'paths': delta_paths(before, after) if before and after else None}
+
+
+def assessment_key(receipt, candidate):
+    return hashlib.sha256(json.dumps({'acceptance_id': receipt_id(receipt), 'candidate': candidate},
+                                    sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def cached_assessment(profile, receipt, candidate, delta):
+    assessments = profile.get('acceptance_assessments', {})
+    if not isinstance(assessments, dict):
+        raise SyncwheelError('acceptance_assessments must be an object')
+    history = assessments.get(assessment_key(receipt, candidate))
+    if history is None:
+        return None
+    if not isinstance(history, list) or not history:
+        raise SyncwheelError('invalid cached acceptance assessment history')
+    stored = history[-1]
+    if not isinstance(stored, dict) or set(stored) != {'assessment', 'actor', 'delta'} or stored['delta'] != delta:
+        raise SyncwheelError('cached candidate delta changed; assess it again')
+    return stored
+
+
+def source_context_observation(receipt, observed, *, repository, requirements=None, scenario=None):
+    reasons = []
+    source = receipt['source']
+    if source['kind'] == 'github_review' and (not repository or source['repository'].casefold() != repository.casefold()):
+        reasons.append('repository_identity_mismatch')
+    if scenario is not None and receipt['scenario_id'] != scenario:
+        reasons.append('scenario_identity_mismatch')
+    if requirements:
+        required = next((s for s in requirements['scenarios'] if s['id'] == receipt['scenario_id']), None)
+        if required is None or required['source'] != source:
+            reasons.append('canonical_scenario_source_mismatch')
+    if reasons:
+        return SourceObservation(dict(observed, source_verification='unverified',
+                                      reasons=list(observed.get('reasons', [])) + reasons))
+    return observed
+
+
+def merge_gates(requirements, profile, *, repository, head, actor, observe_source, delta_paths):
+    """Only a canonical declaration activates this gate; no caller receipt selects it."""
+    requirements = normalize_requirements(requirements)
+    if requirements is None:
+        return None
+    result = {'requirements': requirements, 'candidate': {'revisions': [_sha(head)]},
+              'scenarios': [], 'blockers': []}
+    if not repository or requirements['repository'].casefold() != repository.casefold():
+        result['blockers'].append({'code': 'acceptance_repository_mismatch'})
+        return result
+    for required in requirements['scenarios']:
+        try:
+            observed = observe_source(required['source'])
+            receipt = normalize_receipt(observed['receipt'])
+            observed = source_context_observation(receipt, observed, repository=repository,
+                                                  requirements=requirements, scenario=required['id'])
+            candidate = result['candidate']
+            delta = candidate_delta(receipt, candidate, delta_paths)
+            stored = cached_assessment(profile, receipt, candidate, delta)
+            status = applicability(receipt, candidate, actor=stored['actor'] if stored else actor,
+                                   assessment=stored['assessment'] if stored else None,
+                                   observe_source=lambda source: observed)
+            status['delta'] = delta
+            result['scenarios'].append(status)
+            if status['status'] != 'applicable':
+                result['blockers'].append({'code': 'scenario_acceptance_' + status['status'], 'scenario': required['id']})
+        except SyncwheelError as exc:
+            result['blockers'].append({'code': 'scenario_acceptance_unavailable',
+                                       'scenario': required['id'], 'detail': str(exc)})
+    return result

@@ -135,3 +135,55 @@ forge data or deployment state.
 The positive automated smoke uses controlled fixture identities and a read-only
 fixture `gh` executable. It proves command wiring and trust checks, not the
 identity of any real human or activation in a real repository.
+
+## Optional canonical merge requirement
+
+There is no acceptance merge gate by default. Only the maintainer's canonical
+primary manifest can require scenarios for managed GitHub merges:
+
+```json
+{
+  "scenario_acceptance": {
+    "repository": "example/project",
+    "scenarios": [
+      {"id": "checkout-confirmation", "source": {
+        "kind": "github_review", "repository": "example/project",
+        "pull_request": 7, "review_id": 17
+      }}
+    ]
+  }
+}
+```
+
+Provision this declaration through the repository's existing authority and
+configuration-review procedure. A candidate receipt, private profile or selected
+manifest overlay cannot activate, remove or replace it. A renewal using a new
+source review requires updating its canonical locator through the same procedure.
+The declaration chooses scenario IDs and sources; it does not supply trusted
+human IDs or authenticate anyone by itself.
+
+The repository identity is derived from the one configured URL of the canonical
+remote (the canonical manifest's `defaults.canonical_remote`, or `origin` when
+undeclared). Supported GitHub HTTPS/SSH URLs identify the source namespace.
+Missing, ambiguous or unrelated identity cannot satisfy a verified signoff;
+configuring a merge-policy repository string alone does not establish identity.
+The Git remote configuration is an owner-controlled input, like the executable
+and credentials, not an untrusted candidate declaration. Test fixtures can rewrite
+that transport to their local bare repository without contacting a real forge.
+
+The merge planner consumes each canonical scenario against the stack's observed
+source SHA and current delta assessment. A wrong repository, scenario, source,
+new unassessed candidate, revoked source or changed delta blocks only that
+requested delivery. The plan includes the consumed evidence. Apply recomputes
+it and rechecks canonical configuration and source tip under the existing
+mutation lock before recording a merge start or calling the merge adapter.
+It refuses stale evidence rather than using a positive preview after revocation.
+This does not relax any other authority, CI or review condition.
+
+For standalone `status` and `assess`, an explicit `--head` or the result head in
+`--candidate` must identify the live invoking checkout's head. To assess a managed
+stack from another checkout, pass `--stack STACK`; it selects the live source
+branch from the canonical manifest. `--scenario ID` additionally checks the exact
+expected scenario. Reporting an old accepted SHA cannot masquerade as checking a
+new candidate. Receipt recording remains provenance-only and need not correspond
+to the current checkout.

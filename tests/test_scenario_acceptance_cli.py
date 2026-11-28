@@ -23,6 +23,11 @@ class ScenarioAcceptanceCliTest(unittest.TestCase):
         self.tmp = self.f.fixture.tmp
         self.cli = self.f.fixture.run_cli
         self.head = self.f.fixture.git('rev-parse', 'HEAD')
+        manifest = self.f.fixture.read_manifest()
+        canonical = manifest['defaults']['canonical_remote']
+        configured = self.f.fixture.git('remote').splitlines()
+        self.f.fixture.git('remote', 'set-url' if canonical in configured else 'add', canonical,
+                           'https://github.com/example/project.git')
         self.receipt = fixture_receipt()
         self.receipt['binding'] = {'revisions': [self.head]}
         self.source = SourceFixture(self.receipt)
@@ -88,6 +93,10 @@ print(json.dumps(value))
         clone = self.tmp / 'second-clone'
         self.f.fixture.git('clone', '-q', str(self.f.fixture.repo), str(clone))
         self.assertFalse((clone / '.syncwheel/profile.local.json').exists())
+        import subprocess
+        subprocess.run(['git', '-C', str(clone), 'remote', 'set-url',
+                        self.f.fixture.read_manifest()['defaults']['canonical_remote'],
+                        'https://github.com/example/project.git'], check=True)
         result = self.command('status', '--source', str(self.locator), cwd=clone)
         self.assertEqual(result['status'], 'applicable')
         self.assertEqual(result['receipt'], self.receipt)
@@ -139,6 +148,20 @@ print(json.dumps(value))
         self.save_source()
         result = self.command('status', '--source', str(self.locator), expected=1)
         self.assertIn('source_author_indistinguishable_from_operator', result['source_reasons'])
+
+    def test_unrelated_repository_scenario_and_old_candidate_cannot_reuse_signoff(self):
+        canonical = self.f.fixture.read_manifest()['defaults']['canonical_remote']
+        self.f.fixture.git('remote', 'set-url', canonical, 'https://github.com/unrelated/consumer.git')
+        mismatch = self.command('status', '--receipt', str(self.input), expected=1)
+        self.assertIn('repository_identity_mismatch', mismatch['source_reasons'])
+        self.cli('repo', 'acceptance', 'status', '--source', str(self.locator), expected=2)
+        self.f.fixture.git('remote', 'set-url', canonical, 'https://github.com/example/project.git')
+        mismatch = self.command('status', '--receipt', str(self.input), '--scenario', 'different-scenario', expected=1)
+        self.assertIn('scenario_identity_mismatch', mismatch['source_reasons'])
+        self.f.fixture.git('commit', '--allow-empty', '-qm', 'New live candidate')
+        refused = self.cli('repo', 'acceptance', 'status', '--receipt', str(self.input),
+                           '--head', self.head, expected=2)
+        self.assertIn('does not match the live', refused.stderr)
 
     def test_concurrent_profile_writer_survives_assessment_apply(self):
         self.f.profile.write_text('{}')
