@@ -43,6 +43,15 @@ each parked `conflict` entry into the working tree keeping both sides' intent,
 then `journal publish --apply`. Ask a human only when the sides contradict. Scheduler
 install/remove is also plan-first and Linux-only.
 
+Keep attribution within the repository's delivery mode. Product commits in a
+stack-managed integration projection belong to a declared stack or approved
+historical product classification. Journal changes use the journal lifecycle;
+Syncwheel source maintenance uses the separate native-maintenance procedure;
+manifest and other control-plane metadata changes use an admin checkout or a
+dedicated maintenance PR, excluded from `integration.stacks`. Preserve owner,
+reason, change and review evidence through the applicable path rather than
+turning these administrative changes into product stacks.
+
 When Agentwheel delegates Git revisioning to `syncwheel revision-provider`, it
 must persist its start receipt, call `check` on a clean integration checkout,
 perform the file mutation, then call `preflight` with exact before/after hashes

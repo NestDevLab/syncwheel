@@ -289,9 +289,16 @@ scenario. Renew acceptance if behavior changes, the candidate materially
 changes after approval, or applicability is uncertain. Tests provide evidence
 for behavior; they do not replace acceptance of the intended behavior.
 
-Declare every commit included in shared integration or publication in the
-manifest, with a real owner or approved historical classification. Follow the
-documented capture or reconciliation path for unregistered work. Use only
+In stack-managed repositories, declare every product commit included in shared
+integration or published as a managed stack in the manifest, with its real owner
+or an approved historical classification. Follow the documented capture or
+reconciliation path for unregistered product work. Keep other paths
+accountable under their own contracts: use journal commands for journal
+repositories, native-maintenance delivery for Syncwheel source maintenance, and
+an admin checkout or dedicated maintenance PR for manifest and other
+control-plane metadata, excluded from `integration.stacks`. Record the owner,
+reason, change and review evidence required by that path. Do not assign these
+changes product stacks or historical product classifications. Use only
 project-authorized branches, builds, artifacts and folders for local environment
 changes or deployment; a source-change authorization does not cover deployment.
 Do not use another clone, checkout or output folder to evade review, CI or

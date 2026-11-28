@@ -149,6 +149,14 @@ branch, so both branch and integration containment checks converge.
 `integration.base` but are not declared in any stack. These commits need a
 manifest update or an explicit decision to keep them temporary.
 
+This attribution rule applies to product commits in a stack-managed integration
+projection. Journal repositories use the journal lifecycle instead. Syncwheel
+source maintenance follows the native-maintenance procedure, while manifest and
+other control-plane metadata changes belong in an admin checkout or a dedicated
+maintenance PR and stay out of `integration.stacks`. Preserve owner, reason and
+review evidence through the applicable path; do not model these changes as
+product stacks or historical product commits.
+
 Keep replay order separate from test compatibility. Declare `depends_on` only
 when one stack requires another to replay first, and keep that graph acyclic.
 Resolve dependency cycles as manifest errors. Record compatibility combinations

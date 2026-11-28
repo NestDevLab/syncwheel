@@ -88,11 +88,21 @@ two stacks should be tested together.
 
 ## Delivery boundaries and violations
 
-Every commit included in shared integration or publication must be declared in
-the manifest and attributable to its owning stack or approved historical
-classification. Use the documented capture or reconciliation path to register
-work; do not leave unregistered commits in a shared projection or publish them
-as managed work.
+In stack-managed repositories, every product commit included in the shared
+integration projection or published as a managed stack must be declared in the
+manifest and attributable to its owning stack or an approved historical
+classification. Use the documented capture or reconciliation path; do not
+leave unregistered product commits in that projection or publish them as
+managed work.
+
+Keep other delivery and metadata paths accountable through their own contracts:
+journal repositories use the journal snapshot, pull and publish flow; Syncwheel
+source maintenance follows the separate native-maintenance procedure; and
+manifest or other control-plane metadata changes use an admin checkout or a
+dedicated maintenance PR, excluded from `integration.stacks`. Record the owner,
+reason, change and review evidence required by that path. Do not create stacks
+or historical product classifications for journal entries, native maintenance
+or control-plane metadata.
 
 Use only project-authorized branches, builds, artifacts and folders for local
 environment changes or deployment. An authorization for a source change or a
