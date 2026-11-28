@@ -16,6 +16,9 @@ Default operating stance:
 - integration is rebuilt as an ordered replay of declared stacks
 - channels are optional selected compositions whose exact stack revisions move
   only through explicit channel operations
+- author in a light governed lane by default; use a full lane only for a named
+  dependency, build, test or debugging need that the light lane and repository CI
+  cannot satisfy
 
 ## Why the manifest matters
 
@@ -145,6 +148,32 @@ branch, so both branch and integration containment checks converge.
 `validate` also reports non-merge commits that exist on integration after
 `integration.base` but are not declared in any stack. These commits need a
 manifest update or an explicit decision to keep them temporary.
+
+This attribution rule applies to product commits in a stack-managed integration
+projection. Journal repositories use the journal lifecycle instead. Syncwheel
+source maintenance follows the native-maintenance procedure, while manifest and
+other control-plane metadata changes belong in an admin checkout or a dedicated
+maintenance PR and stay out of `integration.stacks`. Preserve owner, reason and
+review evidence through the applicable path; do not model these changes as
+product stacks or historical product commits.
+
+Keep replay order separate from test compatibility. Declare `depends_on` only
+when one stack requires another to replay first, and keep that graph acyclic.
+Resolve dependency cycles as manifest errors. Record compatibility combinations
+and their CI evidence separately; testing two stacks together does not by itself
+make one a replay dependency of the other.
+
+Use the target pull request and its required CI as the delivery surface. Prefer
+tests on the exact candidate revision and choose additional tests in proportion
+to the changed behavior. When existing CI can test a needed composition, use it
+instead of provisioning a local environment. Local installation or deployment
+must follow the repository's separate environment authorization and deployment
+procedure; a source PR or CI result alone does not authorize it.
+
+Record a sign-off with the expected scenario, approving person, date and exact
+revision or revisions covered. The agent assesses the candidate delta since
+those revisions against the accepted scenario. Renew the sign-off only if the
+expected behavior changes or the delta's impact on that behavior is uncertain.
 
 ## What remains non-deterministic
 

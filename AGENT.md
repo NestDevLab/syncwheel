@@ -43,6 +43,22 @@ each parked `conflict` entry into the working tree keeping both sides' intent,
 then `journal publish --apply`. Ask a human only when the sides contradict. Scheduler
 install/remove is also plan-first and Linux-only.
 
+Keep attribution within the repository's delivery mode. Product commits in a
+stack-managed integration projection belong to a declared stack or approved
+historical product classification. Journal changes use the journal lifecycle;
+Syncwheel source maintenance uses the separate native-maintenance procedure;
+manifest and other control-plane metadata changes use an admin checkout or a
+dedicated maintenance PR, excluded from `integration.stacks`. Preserve owner,
+reason, change and review evidence through the applicable path rather than
+turning these administrative changes into product stacks.
+
+For behavior sign-off, assess the delta since the approved revision against the
+accepted scenario; renew sign-off only if expected behavior changes or impact
+is uncertain. A confirmed repeat violation requires independent review of the
+attributed agent's next publication across lanes; a lane successor does not
+inherit that requirement unless independently found responsible. Hold only the
+affected delivery pending verified recovery and attribution.
+
 When Agentwheel delegates Git revisioning to `syncwheel revision-provider`, it
 must persist its start receipt, call `check` on a clean integration checkout,
 perform the file mutation, then call `preflight` with exact before/after hashes
@@ -118,6 +134,9 @@ End with:
 
 - Install handoff: `install.md`
 - AI agents: `docs/ai-agents.md`
+- Lightweight delivery, acceptance evidence and delivery boundaries:
+  `docs/ai-agents.md#lightweight-delivery-and-acceptance`,
+  `docs/ai-agents.md#delivery-boundaries-and-violations`
 - Agent procedure: `docs/agent-procedure.md`
 - Manifest tracking: `docs/manifest-tracking.md`
 - Active-active protocol: `docs/design/active-active-coordination.md`

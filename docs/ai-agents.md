@@ -53,6 +53,84 @@ rules. Retain plan/operation IDs and digests, merge/readback evidence and a
 reconciliation receipt for uncertain outcomes. Source, merge, installation and
 installed smoke remain separate claims.
 
+## Lightweight delivery and acceptance
+
+Use a light governed lane for ordinary authoring and commit work. Request a
+`--full` lane only when the task names a concrete dependency, build, test or
+debugging need that cannot be met by the light lane and the repository's CI.
+Record that reason in the task or review record before opening the lane. Keep
+the lane's work focused on the assigned change; a light lane is an operational
+boundary, not a security sandbox.
+
+Deliver through the target pull request and its required CI. Prefer CI on the
+exact PR revision for build and test work. Where repository CI provides a
+composition that can exercise the needed environment, use it instead of
+provisioning a local environment. Retest in proportion to the changed behavior:
+run focused tests for the affected behavior and the repository's required CI;
+run broader suites when the change or its dependencies make them relevant.
+Do not treat an optional composition or a local test as a substitute for
+required CI.
+
+Record acceptance as a concrete scenario, the person who approved it, the date,
+and the exact revision or revisions covered. The agent assesses the candidate
+delta since those revisions against the accepted scenario. Renew acceptance
+only when the expected behavior changes or the delta's impact on that behavior
+is uncertain. A passing test is evidence for its behavior, not a replacement
+for acceptance of the intended behavior.
+
+Keep replay dependencies and compatibility evidence separate. Use declared
+stack dependencies only when one change requires another to be replayed first;
+the dependency graph must be acyclic. A cycle is a dependency error to resolve,
+not a compatibility-test result. Record compatibility combinations and their
+test evidence separately; do not add ordering dependencies just to express that
+two stacks should be tested together.
+
+## Delivery boundaries and violations
+
+In stack-managed repositories, every product commit included in the shared
+integration projection or published as a managed stack must be declared in the
+manifest and attributable to its owning stack or an approved historical
+classification. Use the documented capture or reconciliation path; do not
+leave unregistered product commits in that projection or publish them as
+managed work.
+
+Keep other delivery and metadata paths accountable through their own contracts:
+journal repositories use the journal snapshot, pull and publish flow; Syncwheel
+source maintenance follows the separate native-maintenance procedure; and
+manifest or other control-plane metadata changes use an admin checkout or a
+dedicated maintenance PR, excluded from `integration.stacks`. Record the owner,
+reason, change and review evidence required by that path. Do not create stacks
+or historical product classifications for journal entries, native maintenance
+or control-plane metadata.
+
+Use only project-authorized branches, builds, artifacts and folders for local
+environment changes or deployment. An authorization for a source change or a
+pull request does not by itself authorize an environment install, deployment or
+service change. Do not switch to another clone, checkout, build output or folder
+to evade branch, CI, review or deployment rules. Follow the repository's
+deployment procedure and retain evidence that ties the deployed artifact to its
+approved source revision.
+
+Syncwheel can validate and manage the refs and metadata described by its
+manifest. Its local CLI and hooks do not secure arbitrary clones, local build
+tools, environment credentials or deployment systems; repository CI, forge
+protections and the deployment system must enforce those boundaries. Treat a
+confirmed violation as a blocker only for the affected delivery, until its work
+is recovered and attribution is verified. Discovery or reporting of an issue is
+not itself a violation. Do not impose a global block on unrelated work. When a
+repeat violation is confirmed and attributed to an agent, require independent
+review of that agent's next publication, regardless of lane. A successor who
+takes over a lane does not inherit this requirement unless that successor is
+independently found responsible. Record the evidence, affected delivery,
+recovery and attribution; do not infer a violation from a warning or an
+unresolved diagnostic alone.
+
+Lane justification, scenario sign-off, acceptance renewal and repeat-violation
+review are workflow requirements, not CLI-enforced approvals. The CLI exposes
+`worktree open --full` and records lane metadata; it does not determine whether
+the task needed a full lane or whether a person approved its behavior. Use the
+repository's PR, CI and deployment controls for those decisions.
+
 ## Ratified working rules (read this first)
 
 Follow these four operating rules before changing a managed repository.
