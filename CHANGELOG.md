@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.53.5 - 2026-11-28
+
+- Add scenario acceptance provenance, live trusted-source verification and candidate-bound agent delta assessments. Recover shared decisions from exact forge review IDs, retain unverified provenance when human identity is not distinguishable, and require renewed acceptance for changed or uncertain behavior. Bind verification to the canonical repository and live candidate, consume scenarios from the verified live destination base policy in merge planning/apply, authenticate authority host/repository ID/ref/tree/blob through the fixed live forge adapter independently of local aliases or candidate metadata, and recheck revocation before merge. Preserve private configuration CAS and keep trust policy separate from candidate data.
+
 ## 0.53.4 - 2026-11-28
 
 - Evaluate independent PR delivery against its real required CI when integration validation is advisory, without requiring or creating a local integration projection. Retain membership, source identity, dependency, authority and forge-check gates.

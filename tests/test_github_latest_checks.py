@@ -97,7 +97,7 @@ class GithubLatestChecksTest(unittest.TestCase):
 
         def run_json(argv, cwd):
             if argv == ['api', f'repos/{self.repository}']:
-                value = {'full_name': self.repository, 'permissions': {'admin': True},
+                value = {'id': 1000, 'full_name': self.repository, 'permissions': {'admin': True},
                          'allow_squash_merge': True}
             elif argv == ['api', 'user']:
                 value = {'login': self.actor}
@@ -150,6 +150,8 @@ class GithubLatestChecksTest(unittest.TestCase):
 
         with (
             mock.patch.object(self.github, 'run_json', side_effect=run_json),
+            mock.patch.object(self.github, 'observe_acceptance_authority', return_value=dict(
+                self.fixture.acceptance_authority(), repository={'id': 1000, 'full_name': self.repository})),
             mock.patch.object(self.github, '_optional_api', side_effect=observe_rule),
             mock.patch.object(self.syncwheel, 'github_adapter_request', side_effect=observe),
             mock.patch.object(self.syncwheel, 'validate_manifest', return_value={'errors': []}),

@@ -115,12 +115,26 @@ class GithubPrMergeTest(unittest.TestCase):
             'checks': 'all',
         }
 
+    def acceptance_authority(self):
+        try:
+            base = self.git('--git-dir=' + str(self.remote), 'rev-parse', 'refs/heads/main')
+        except AssertionError:
+            base = self.base
+        tree = self.git('rev-parse', base + '^{tree}')
+        return {'schemaVersion': 1, 'kind': 'githubAcceptanceAuthority', 'host': 'github.com',
+                'repository': {'id': 1000, 'full_name': self.policy()['repository']},
+                'branch': 'main', 'base_sha': base, 'root_tree_sha': tree,
+                'path': '.syncwheel/acceptance-policy.json', 'state': 'absent',
+                'blob_sha': None, 'content': None}
+
     def observation(self, *, state='OPEN', decision='REVIEW_REQUIRED', checks=None, head=None):
         return {
             'schemaVersion': 1,
             'repository': 'NestDevLab/agent-core-toolkit-public',
             'identity': {'login': 'Yehonal'},
+            'acceptanceAuthority': self.acceptance_authority(),
             'repositoryInfo': {
+                'id': 1000,
                 'permissions': {'admin': True},
                 'allowMergeMethods': {'squash': True, 'merge': True, 'rebase': True},
             },
@@ -525,6 +539,7 @@ class GithubPrMergeTest(unittest.TestCase):
         limited = {'status': 403, 'value': None, 'detail': ADAPTER.PLAN_LIMIT_MESSAGE}
         replies = [{'value': value} for value in (repo, {'login': 'fixture'}, {}, {}, graph)]
         with mock.patch.object(ADAPTER, 'run_json', side_effect=replies) as query, \
+             mock.patch.object(ADAPTER, 'observe_acceptance_authority', return_value=self.acceptance_authority()), \
              mock.patch.object(ADAPTER, '_optional_api', return_value=limited) as rest:
             observed = ADAPTER.observe({
                 'repository': 'Example/project', 'baseBranch': 'main', 'pullRequestNumber': 25,
@@ -692,7 +707,7 @@ class GithubPrMergeTest(unittest.TestCase):
             )
         merged = self.observation(state='MERGED', decision='APPROVED')
         merged['pr']['mergeCommit'] = 'f' * 40
-        adapter_results = [self.observation(), {'ok': False, 'returncode': 1, 'stderr': 'already merged'}, merged]
+        adapter_results = [self.observation(), self.observation(), {'ok': False, 'returncode': 1, 'stderr': 'already merged'}, merged]
         output = io.StringIO()
         with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
              mock.patch.object(SYNCWHEEL, 'github_adapter_request', side_effect=adapter_results), \
@@ -720,7 +735,7 @@ class GithubPrMergeTest(unittest.TestCase):
             )
         open_after_rejection = self.observation()
         adapter_results = [
-            self.observation(),
+            self.observation(), self.observation(),
             {'ok': False, 'returncode': 1, 'argv': ['pr', 'merge'], 'stderr': 'protected branch'},
             open_after_rejection,
         ]

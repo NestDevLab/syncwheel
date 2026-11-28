@@ -2,6 +2,9 @@
 """Fixed GitHub adapter for Syncwheel's plan-first PR merge contract."""
 
 from collections import Counter
+import base64
+import hashlib
+from urllib.parse import quote
 import json
 import os
 import re
@@ -99,7 +102,7 @@ def run_gh(argv, cwd, timeout=DEFAULT_TIMEOUT_SECONDS):
             text=True,
             capture_output=True,
             timeout=timeout,
-            env=dict(os.environ),
+            env=dict(os.environ, GH_HOST="github.com"),
             shell=False,
             check=False,
         )
@@ -491,7 +494,7 @@ def _optional_api(repo, path, cwd):
     try:
         result = subprocess.run(
             ["gh", "api", "--include", path], cwd=cwd, text=True, capture_output=True,
-            timeout=DEFAULT_TIMEOUT_SECONDS, env=dict(os.environ), shell=False, check=False,
+            timeout=DEFAULT_TIMEOUT_SECONDS, env=dict(os.environ, GH_HOST="github.com"), shell=False, check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return {"status": -1, "value": None, "detail": str(exc)}
@@ -612,6 +615,80 @@ def _observe_rules(repository, repo_info, protection, rulesets, cwd):
     return rules
 
 
+ACCEPTANCE_POLICY_PATH = '.syncwheel/acceptance-policy.json'
+
+
+def observe_acceptance_authority(request, cwd):
+    """Authenticate destination identity and policy through fixed github.com APIs."""
+    repository = validate_repository(request.get('repository'))
+    branch = validate_branch(request.get('baseBranch'), 'baseBranch')
+    def api(path):
+        return run_json(['api', '--hostname', 'github.com', path], cwd)['value']
+    def sha(value):
+        if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value):
+            raise AdapterError('invalid authenticated Git object identity')
+        return value
+    info = api('repos/' + repository)
+    if (not isinstance(info, dict) or type(info.get('id')) is not int or info['id'] <= 0
+            or str(info.get('full_name', '')).casefold() != repository.casefold()):
+        raise AdapterError('authenticated repository identity mismatch')
+    ref = api('repos/' + repository + '/git/ref/heads/' + quote(branch, safe=''))
+    if (not isinstance(ref, dict) or ref.get('ref') != 'refs/heads/' + branch
+            or not isinstance(ref.get('object'), dict) or ref['object'].get('type') != 'commit'):
+        raise AdapterError('authenticated destination ref mismatch')
+    base = sha(ref['object'].get('sha'))
+    commit = api('repos/' + repository + '/git/commits/' + base)
+    if not isinstance(commit, dict) or commit.get('sha') != base or not isinstance(commit.get('tree'), dict):
+        raise AdapterError('authenticated destination commit mismatch')
+    root = sha(commit['tree'].get('sha'))
+    result = {'schemaVersion': 1, 'kind': 'githubAcceptanceAuthority', 'host': 'github.com',
+              'repository': {'id': info['id'], 'full_name': info['full_name']},
+              'branch': branch, 'base_sha': base, 'root_tree_sha': root,
+              'path': ACCEPTANCE_POLICY_PATH, 'state': 'absent', 'blob_sha': None, 'content': None}
+    def entry(tree_sha, name):
+        tree = api('repos/' + repository + '/git/trees/' + tree_sha)
+        if (not isinstance(tree, dict) or tree.get('sha') != tree_sha
+                or tree.get('truncated') is not False or not isinstance(tree.get('tree'), list)):
+            raise AdapterError('cannot prove acceptance policy membership from incomplete tree')
+        seen = set()
+        for item in tree['tree']:
+            if (not isinstance(item, dict) or not isinstance(item.get('path'), str)
+                    or not item['path'] or '/' in item['path'] or '\0' in item['path']
+                    or item['path'] in seen or not isinstance(item.get('type'), str)
+                    or item['type'] not in {'tree', 'blob', 'commit'}):
+                raise AdapterError('malformed authenticated policy tree entry')
+            sha(item.get('sha'))
+            seen.add(item['path'])
+        matches = [item for item in tree['tree'] if item['path'] == name]
+        return matches[0] if matches else None
+    directory = entry(root, '.syncwheel')
+    if directory is None:
+        return result
+    if directory.get('type') != 'tree' or directory.get('mode') != '040000':
+        raise AdapterError('authenticated policy directory is not a tree')
+    policy = entry(sha(directory.get('sha')), 'acceptance-policy.json')
+    if policy is None:
+        return result
+    if policy.get('type') != 'blob' or policy.get('mode') != '100644':
+        raise AdapterError('authenticated policy is not a regular JSON file')
+    blob_sha = sha(policy.get('sha'))
+    blob = api('repos/' + repository + '/git/blobs/' + blob_sha)
+    if (not isinstance(blob, dict) or blob.get('sha') != blob_sha or blob.get('encoding') != 'base64'
+            or not isinstance(blob.get('content'), str)):
+        raise AdapterError('authenticated policy blob identity mismatch')
+    try:
+        content = base64.b64decode(''.join(blob['content'].splitlines()), validate=True)
+        hasher = hashlib.sha1 if len(blob_sha) == 40 else hashlib.sha256
+        actual = hasher(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+        if actual != blob_sha:
+            raise ValueError('blob hash mismatch')
+        text = content.decode('utf-8')
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise AdapterError('authenticated policy blob failed content verification') from exc
+    result.update(state='present', blob_sha=blob_sha, content=text)
+    return result
+
+
 def observe(request, cwd):
     repository = validate_repository(request.get("repository"))
     base_branch = validate_branch(request.get("baseBranch"), "baseBranch")
@@ -671,6 +748,11 @@ def observe(request, cwd):
         "merge": bool(repo_info.get("allow_merge_commit")),
         "rebase": bool(repo_info.get("allow_rebase_merge")),
     }
+    try:
+        acceptance_authority = observe_acceptance_authority(request, cwd)
+        acceptance_error = None
+    except AdapterError as exc:
+        acceptance_authority, acceptance_error = None, str(exc)
     return {
         "schemaVersion": SCHEMA_VERSION,
         "repository": repository,
@@ -678,7 +760,10 @@ def observe(request, cwd):
             "login": identity.get("login") if isinstance(identity, dict) else None,
             "id": identity.get("id") if isinstance(identity, dict) else None,
         },
+        "acceptanceAuthority": acceptance_authority,
+        "acceptanceAuthorityError": acceptance_error,
         "repositoryInfo": {
+            "id": repo_info.get("id"),
             "permissions": repo_info.get("permissions") or {},
             "allowMergeMethods": allow,
             "defaultBranch": repo_info.get("default_branch"),
@@ -731,7 +816,7 @@ def merge(request, cwd):
     try:
         result = subprocess.run(
             ["gh", *argv], cwd=cwd, text=True, capture_output=True,
-            timeout=DEFAULT_TIMEOUT_SECONDS, env=dict(os.environ), shell=False, check=False,
+            timeout=DEFAULT_TIMEOUT_SECONDS, env=dict(os.environ, GH_HOST="github.com"), shell=False, check=False,
         )
     except FileNotFoundError as exc:
         raise AdapterError("gh executable is not installed") from exc
@@ -753,9 +838,11 @@ def handle(request, cwd):
     operation = request.get("operation")
     if operation == "observe":
         return {"schemaVersion": SCHEMA_VERSION, "ok": True, "observation": observe(request, cwd)}
+    if operation == "observe_acceptance_authority":
+        return {"schemaVersion": SCHEMA_VERSION, "ok": True, "observation": observe_acceptance_authority(request, cwd)}
     if operation == "merge":
         return merge(request, cwd)
-    raise AdapterError("operation must be observe or merge")
+    raise AdapterError("operation must be observe, observe_acceptance_authority or merge")
 
 
 def main():
