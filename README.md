@@ -3,12 +3,16 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.53.2`
+Current version: `0.53.5`
 
 Operational private `disabled`, `minimal`, `standard`, `strict` and per-field
 custom preferences are available through
 [`execution-policy`](docs/execution-policy.md), with candidate evidence separate
 from installed-release smoke.
+
+[Scenario acceptance](docs/scenario-acceptance.md) records human-source provenance
+and exact-candidate agent assessments, with live source verification separate
+from recording a receipt.
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay

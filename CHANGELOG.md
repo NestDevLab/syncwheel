@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.53.5 - 2026-11-28
+
+- Add scenario acceptance provenance, live trusted-source verification and candidate-bound agent delta assessments. Recover shared decisions from exact forge review IDs, retain unverified provenance when human identity is not distinguishable, and require renewed acceptance for changed or uncertain behavior. Preserve private configuration CAS and keep trust policy separate from candidate data.
+
 ## 0.53.2 - 2026-11-27
 
 - Confine stack Git and recipe-add worktree recovery to the selected target, including pending intents, terminal registry records and path repairs. Keep unrelated lanes and lock evidence for explicit maintenance.

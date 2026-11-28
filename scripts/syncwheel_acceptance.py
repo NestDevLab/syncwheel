@@ -251,3 +251,120 @@ def applicability(receipt, candidate, *, actor, assessment=None, observe_source)
             'status': ('source_unverified' if not source_verified else
                        'renewal_required' if renewal else 'applicable'),
             'notice': 'agent delta assessment is separate from the human source decision'}
+
+
+def trusted_ids(settings, repository):
+    """Only the maintainer's user policy supplies trust, never candidate/profile data."""
+    policy = settings.get('acceptance_trust', {})
+    if not isinstance(policy, dict) or set(policy) - {'github'}:
+        raise SyncwheelError('invalid maintainer acceptance_trust policy')
+    github = policy.get('github', {})
+    if not isinstance(github, dict):
+        raise SyncwheelError('acceptance_trust.github must map repositories to human IDs')
+    ids = github.get(repository, [])
+    if not isinstance(ids, list) or any(type(item) is not int or item <= 0 for item in ids):
+        raise SyncwheelError('maintainer trusted human IDs must be positive integers')
+    return ids
+
+
+def _read_input(path):
+    from pathlib import Path
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise SyncwheelError('cannot read acceptance input: ' + str(exc)) from exc
+
+
+def run_command(args, *, profile, write_profile, settings, actor, current_head,
+                require_revision, read_source, delta_paths):
+    """Public command service; I/O, actor and private profile CAS remain facade ports."""
+    if args.acceptance_action == 'record':
+        receipts = [_read_input(name) for name in args.receipt]
+        proposed = record_receipts(profile, receipts, actor=actor)
+        result = {'applied': False, 'proposed': proposed,
+                  'notice': 'provenance recorded; this operation verifies no human approval'}
+        if args.apply:
+            write_profile(proposed)
+            result['applied'] = True
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    live = None
+    if args.source:
+        source = normalize_source(_read_input(args.source))
+        if source['kind'] != 'github_review':
+            raise SyncwheelError('source-only recovery requires a supported shared source owner')
+        live = read_source(source, trusted_ids(settings, source['repository']))
+        receipt = live['receipt']
+    elif args.receipt:
+        receipt = normalize_receipt(_read_input(args.receipt))
+    else:
+        entries = profile.get(EVIDENCE_KEY, {})
+        record = entries.get(args.acceptance_id) if isinstance(entries, dict) else None
+        if not isinstance(record, dict):
+            raise SyncwheelError('acceptance receipt not found; recover from its shared source locator')
+        receipt = normalize_receipt(record.get('receipt'))
+        if receipt_id(receipt) != args.acceptance_id:
+            raise SyncwheelError('cached acceptance receipt identity mismatch')
+
+    def observe(source):
+        if live is not None:
+            return live
+        if source['kind'] == 'github_review':
+            return read_source(source, trusted_ids(settings, source['repository']))
+        return provenance_observation(receipt)
+
+    candidate = normalize_binding(_read_input(args.candidate)) if args.candidate else {
+        'revisions': [_sha(args.head or current_head())]}
+    for binding in (receipt['binding'], candidate):
+        revisions = (binding['revisions'] if 'revisions' in binding else
+                     [binding['composition']['base_sha'], binding['composition']['head_sha'],
+                      *(s['head_sha'] for s in binding['composition']['stacks'])])
+        for revision in revisions:
+            require_revision(revision)
+    accepted_head = (receipt['binding']['revisions'][0]
+                     if 'revisions' in receipt['binding'] and len(receipt['binding']['revisions']) == 1
+                     else receipt['binding'].get('composition', {}).get('head_sha'))
+    candidate_head = (candidate['revisions'][0] if 'revisions' in candidate and len(candidate['revisions']) == 1
+                      else candidate.get('composition', {}).get('head_sha'))
+    delta = {'accepted_binding': receipt['binding'], 'candidate_binding': candidate,
+             'paths': delta_paths(accepted_head, candidate_head)
+             if accepted_head and candidate_head else None}
+    selected = None
+    selected_actor = actor
+    assessments = profile.get('acceptance_assessments', {})
+    if not isinstance(assessments, dict):
+        raise SyncwheelError('acceptance_assessments must be an object')
+    key = hashlib.sha256(json.dumps({'acceptance_id': receipt_id(receipt), 'candidate': candidate},
+                                   sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    if args.acceptance_action == 'assess':
+        from datetime import timezone
+        selected = {'schema_version': 1, 'kind': 'scenario_assessment',
+                    'acceptance_id': receipt_id(receipt), 'candidate': candidate,
+                    'impact': args.impact, 'rationale': args.rationale,
+                    'assessed_at': datetime.now(timezone.utc).isoformat(), 'reference': args.reference}
+    elif args.assessment:
+        selected = _read_input(args.assessment)
+    elif key in assessments:
+        history = assessments[key]
+        if not isinstance(history, list) or not history:
+            raise SyncwheelError('invalid cached acceptance assessment history')
+        stored = history[-1]
+        if not isinstance(stored, dict) or set(stored) != {'assessment', 'actor', 'delta'}:
+            raise SyncwheelError('invalid cached acceptance assessment')
+        selected, selected_actor = stored['assessment'], stored['actor']
+        if stored['delta'] != delta:
+            raise SyncwheelError('cached candidate delta changed; assess it again')
+    result = applicability(receipt, candidate, actor=selected_actor, assessment=selected,
+                           observe_source=observe)
+    result.update(receipt=receipt, delta=delta, applied=False)
+    if args.acceptance_action == 'assess' and args.apply:
+        proposed = record_receipts(profile, [receipt], actor=actor)
+        history = proposed.setdefault('acceptance_assessments', {}).setdefault(key, [])
+        if not isinstance(history, list):
+            raise SyncwheelError('invalid cached acceptance assessment history')
+        history.append({'assessment': selected, 'actor': actor, 'delta': delta})
+        write_profile(proposed)
+        result['applied'] = True
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result['status'] == 'applicable' else 1

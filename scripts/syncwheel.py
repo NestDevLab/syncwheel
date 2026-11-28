@@ -352,6 +352,8 @@ from syncwheel_coordination import (
 import syncwheel_cli as _cli
 import syncwheel_worktree_policy as _worktree_policy
 import syncwheel_execution_policy as _execution_policy
+import syncwheel_acceptance as _acceptance
+import syncwheel_github as _acceptance_github
 import syncwheel_private_json as _private_json
 from syncwheel_contracts import (
     CHANNEL_PLAN_SCHEMA_VERSION,
@@ -5334,6 +5336,34 @@ def command_worktree_policy(args):
     return _worktree_policy.run_policy_command(
         args, settings_path=get_settings_path(), load_json=load_private_configuration,
         write_json=save_private_configuration, **options,
+    )
+
+
+def command_repo_acceptance(args):
+    selected_checkout = resolve_repo_root(args.repo)
+    root = worktree_policy_root(selected_checkout)
+    path = checked_repo_profile_path(root)
+    if getattr(args, 'apply', False) and (git_path_is_tracked(root, path) or git(
+            root, 'check-ignore', '--quiet', '--no-index', '--',
+            '.syncwheel/profile.local.json', check=False).returncode != 0):
+        raise SyncwheelError('acceptance cache must be ignored and untracked')
+
+    def read_source(source, trusted):
+        def read_json(endpoint):
+            try:
+                return _acceptance_github.run_json(['api', endpoint], str(root))['value']
+            except _acceptance_github.AdapterError as exc:
+                raise SyncwheelError('cannot verify live acceptance source: ' + str(exc)) from exc
+        return _acceptance.observe_github_signoff(
+            source, trusted_human_ids=trusted, read_json=read_json)
+
+    return _acceptance.run_command(
+        args, profile=load_repo_profile(root), write_profile=lambda value: save_repo_profile(root, value),
+        settings=load_private_configuration(get_settings_path(), {}), actor=governed_worktree_owner(),
+        current_head=lambda: git(selected_checkout, 'rev-parse', 'HEAD').stdout.strip(),
+        require_revision=lambda sha: git(root, 'cat-file', '-e', sha + '^{commit}'),
+        read_source=read_source,
+        delta_paths=lambda before, after: git(root, 'diff', '--name-status', before, after).stdout.splitlines(),
     )
 
 
@@ -21371,6 +21401,8 @@ def main():
         or (desk_release and not args.apply)
     )
     try:
+        if args.func == command_repo_acceptance:
+            return command_repo_acceptance(args)
         if args.func == command_worktree_policy:
             # Private preferences own no refs or lanes and must be configurable
             # outside a repository, or while an existing lane needs recovery.
@@ -21595,6 +21627,7 @@ def command_handlers():
         'command_reconcile': command_reconcile,
         'command_replay_mode': command_replay_mode,
         'command_worktree_policy': command_worktree_policy,
+        'command_repo_acceptance': command_repo_acceptance,
         'command_repo_add': command_repo_add,
         'command_repo_authority_set': command_repo_authority_set,
         'command_repo_authority_status': command_repo_authority_status,

@@ -76,7 +76,9 @@ and the exact revision or revisions covered. The agent assesses the candidate
 delta since those revisions against the accepted scenario. Renew acceptance
 only when the expected behavior changes or the delta's impact on that behavior
 is uncertain. A passing test is evidence for its behavior, not a replacement
-for acceptance of the intended behavior.
+for acceptance of the intended behavior. Use the [scenario acceptance commands](scenario-acceptance.md)
+to record portable provenance, re-observe a supported trusted source and bind
+the agent assessment to an exact candidate. Recording alone verifies no human decision.
 
 Keep replay dependencies and compatibility evidence separate. Use declared
 stack dependencies only when one change requires another to be replayed first;
