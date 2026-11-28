@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 import test_worktree_policy as fixtures
-from test_scenario_acceptance import SourceFixture, fixture_receipt
+from test_scenario_acceptance import SourceFixture, fixture_receipt, forge_authority_responses
 
 
 class ScenarioAcceptanceCliTest(unittest.TestCase):
@@ -52,10 +52,11 @@ import json,os,sys
 r=json.load(open(os.environ['FIXTURE_ACCEPTANCE_SOURCE']))
 p=sys.argv[1:]
 assert p[0]=='api',p
-path=p[1]
+path=p[-1]
 if path=='user': value=r['principal']
 elif path=='repos/example/project/pulls/7/reviews/17': value=r['review']
 elif path=='repos/example/project/collaborators/approver/permission': value=r['permission']
+elif path in r['authority']: value=r['authority'][path]
 else: raise AssertionError(path)
 if os.environ.get('FIXTURE_CONCURRENT_PROFILE') and path.endswith('/permission'):
  from pathlib import Path
@@ -75,7 +76,10 @@ print(json.dumps(value))
     def save_source(self):
         self.remote.write_text(json.dumps({'review': self.source.review,
                                           'principal': self.source.principal,
-                                          'permission': self.source.permission}))
+                                          'permission': self.source.permission,
+                                          'authority': dict(forge_authority_responses(self.authority_remote), **
+                                              forge_authority_responses(self.authority_remote,
+                                                  repository='unrelated/consumer', repository_id=2000))}))
 
     def command(self, *args, **kwargs):
         return json.loads(self.cli('repo', 'acceptance', *args, '--json', **kwargs).stdout)

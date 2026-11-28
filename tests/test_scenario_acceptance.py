@@ -214,3 +214,38 @@ class ScenarioAcceptanceTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
+def forge_authority_responses(git_dir, repository='example/project', branch='main', repository_id=1000):
+    """Controlled forge API objects from an independent bare owner repository."""
+    import base64
+    import subprocess
+    def git(*args):
+        return subprocess.check_output(['git', '--git-dir=' + str(git_dir), *args])
+    base = git('rev-parse', 'refs/heads/' + branch).decode().strip()
+    root = git('rev-parse', base + '^{tree}').decode().strip()
+    prefix = 'repos/' + repository
+    result = {prefix: {'id': repository_id, 'full_name': repository},
+              prefix + '/git/ref/heads/' + branch: {'ref': 'refs/heads/' + branch,
+                                                     'object': {'type': 'commit', 'sha': base}},
+              prefix + '/git/commits/' + base: {'sha': base, 'tree': {'sha': root}}}
+    def tree(sha):
+        entries = []
+        for line in git('ls-tree', '-z', sha).split(b'\0'):
+            if not line:
+                continue
+            header, path = line.decode().split('\t', 1)
+            mode, kind, oid = header.split()
+            entries.append({'mode': mode, 'type': kind, 'sha': oid, 'path': path})
+        result[prefix + '/git/trees/' + sha] = {'sha': sha, 'truncated': False, 'tree': entries}
+        return entries
+    for directory in tree(root):
+        if directory['path'] == '.syncwheel' and directory['type'] == 'tree':
+            for policy in tree(directory['sha']):
+                if policy['path'] == 'acceptance-policy.json' and policy['type'] == 'blob':
+                    payload = git('cat-file', 'blob', policy['sha'])
+                    result[prefix + '/git/blobs/' + policy['sha']] = {
+                        'sha': policy['sha'], 'encoding': 'base64', 'size': len(payload),
+                        'content': base64.b64encode(payload).decode()}
+    return result

@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 import test_github_pr_merge as merge_fixture
-from test_scenario_acceptance import SourceFixture, fixture_receipt, assessment
+from test_scenario_acceptance import SourceFixture, fixture_receipt, assessment, forge_authority_responses
 
 S = merge_fixture.SYNCWHEEL
 A = S._acceptance
@@ -76,13 +76,26 @@ class AcceptanceMergeTest(unittest.TestCase):
     def write_manifest(self):
         self.f.manifest_path.write_text(json.dumps(self.f.manifest))
 
+    def authority(self):
+        responses = forge_authority_responses(self.f.remote)
+        def read(argv, cwd):
+            self.assertEqual(argv[:3], ['api', '--hostname', 'github.com'])
+            return {'value': responses[argv[-1]]}
+        with mock.patch.object(S._acceptance_github, 'run_json', side_effect=read):
+            return S._acceptance_github.observe_acceptance_authority(
+                {'repository': 'example/project', 'baseBranch': 'main'}, str(self.f.repo))
+
     def adapter(self, repo, request):
         self.requests.append(request)
+        if request['operation'] == 'observe_acceptance_authority':
+            return self.authority()
         if request['operation'] == 'merge':
             self.observed['pr']['state'] = 'MERGED'
             self.observed['pr']['mergeCommit'] = 'f' * 40
             return {'ok': True}
-        return copy.deepcopy(self.observed)
+        result = copy.deepcopy(self.observed)
+        result['acceptanceAuthority'] = self.authority()
+        return result
 
     def api(self, argv, cwd):
         if '/reviews/' in argv[1]:
@@ -113,18 +126,37 @@ class AcceptanceMergeTest(unittest.TestCase):
         self.assertEqual(result['status'], 'ready')
 
     def test_wrong_repository_or_required_scenario_blocks_planner(self):
-        self.f.git('remote', 'set-url', 'origin', 'https://github.com/unrelated/consumer.git')
-        result = self.plan()
+        wrong = self.authority()
+        wrong['repository'] = {'id': 2000, 'full_name': 'unrelated/consumer'}
+        with mock.patch.object(self, 'authority', return_value=wrong):
+            result = self.plan()
         self.assertEqual(result['status'], 'blocked')
         self.assertIn('acceptance_authority_unavailable', [b['code'] for b in result['blockers']])
-        self.assertEqual(self.source_reads, 0)
-        self.f.git('remote', 'set-url', 'origin', 'https://github.com/example/project.git')
         payload = json.loads(self.source.review['body'])
         payload['scenario_id'] = 'another-required-scenario'
         self.source.review['body'] = json.dumps(payload)
         result = self.plan()
         self.assertEqual(result['status'], 'blocked')
         self.assertIn('scenario_identity_mismatch', result['acceptanceEvidence']['scenarios'][0]['source_reasons'])
+
+    def test_forge_binding_and_unavailability_cannot_be_replaced_by_local_policy_data(self):
+        valid = self.authority()
+        cases = {
+            'host': dict(valid, host='untrusted.invalid'),
+            'repository_id': dict(valid, repository={'id': 2000, 'full_name': 'example/project'}),
+            'branch': dict(valid, branch='other'),
+            'base': dict(valid, base_sha='0' * 40),
+            'tree': dict(valid, root_tree_sha='0' * 40),
+            'blob': dict(valid, blob_sha='0' * 40),
+            'content': dict(valid, content='{}'),
+            'unavailable': None,
+        }
+        for name, proof in cases.items():
+            with self.subTest(case=name), mock.patch.object(self, 'authority', return_value=proof):
+                plan = self.plan()
+                self.assertEqual(plan['status'], 'blocked')
+                self.assertIn('acceptance_authority_unavailable', [b['code'] for b in plan['blockers']])
+                self.assertIsNone(plan['acceptanceAuthority'])
 
     def test_candidate_delta_requires_exact_assessment_and_changed_delta_reblocks(self):
         self.receipt['binding'] = {'revisions': [self.f.base]}
@@ -193,8 +225,7 @@ class AcceptanceMergeTest(unittest.TestCase):
         self.source.review['state'] = 'DISMISSED'
         plan = self.plan()
         self.assertEqual(plan['status'], 'blocked')
-        self.assertEqual(plan['acceptanceAuthority']['remote'], 'origin')
-        self.assertIsNotNone(plan['acceptanceEvidence'])
+        self.assertIn('acceptance_authority_unavailable', [b['code'] for b in plan['blockers']])
 
     def test_candidate_cannot_remove_protected_owner_policy_blob(self):
         self.f.git('switch', '-q', 'pr/feature')
@@ -232,7 +263,7 @@ class AcceptanceMergeTest(unittest.TestCase):
                     self.f.git('--git-dir=' + str(self.f.remote), 'update-ref', 'refs/heads/main', changed, self.f.base)
                 yield
         with mock.patch.object(S, 'channel_mutation_lock', side_effect=race):
-            with self.assertRaisesRegex(S.SyncwheelError, 'scenario acceptance changed before merge'):
+            with self.assertRaisesRegex(S.SyncwheelError, 'acceptance base differs|scenario acceptance changed before merge'):
                 S.command_stack_merge_pr(self.f.args(apply=True, plan_digest=preview['planDigest']))
         self.assertFalse(any(r['operation'] == 'merge' for r in self.requests))
 
@@ -240,13 +271,16 @@ class AcceptanceMergeTest(unittest.TestCase):
         bin_dir = self.f.tmp / 'public-bin'
         bin_dir.mkdir()
         state_path = self.f.tmp / 'public-state.json'
-        state_path.write_text(json.dumps({'observation': self.observed, 'source': {
+        public_observation = dict(self.observed, acceptanceAuthority=self.authority())
+        state_path.write_text(json.dumps({'observation': public_observation, 'source': {
             'review': self.source.review, 'principal': self.source.principal,
             'permission': self.source.permission}, 'merges': 0}))
         adapter = bin_dir / 'syncwheel-github'
         adapter.write_text("""#!/usr/bin/env python3
 import json,os,sys,subprocess
 p=os.environ['ACCEPTANCE_FIXTURE_STATE']; state=json.load(open(p)); req=json.load(sys.stdin)
+if req['operation']=='observe_acceptance_authority':
+ print(json.dumps({'ok':True,'observation':state['observation']['acceptanceAuthority']}));sys.exit(0)
 if req['operation']=='merge':
  state['merges']+=1
  state['observation']['pr']['state']='MERGED'

@@ -136,11 +136,11 @@ The positive automated smoke uses controlled fixture identities and a read-only
 fixture `gh` executable. It proves command wiring and trust checks, not the
 identity of any real human or activation in a real repository.
 
-## Optional destination-owned merge requirement
+## Optional forge-owned merge requirement
 
-There is no acceptance merge gate by default. Only a regular JSON policy file
-`.syncwheel/acceptance-policy.json` at the **live destination branch's verified
-base commit** can require scenarios for managed GitHub merges:
+There is no acceptance signoff gate when its policy is proven absent. A regular
+JSON file `.syncwheel/acceptance-policy.json` at the **live GitHub destination
+branch's base commit** can require scenarios:
 
 ```json
 {
@@ -155,48 +155,45 @@ base commit** can require scenarios for managed GitHub merges:
 ```
 
 The destination owner provisions or changes this file through its separately
-protected configuration-review procedure. It is read from the immutable Git
-object fetched at the exact live delivery base, not from the candidate's files,
-primary checkout, selected manifest or private profile. A `scenario_acceptance`
-field in a local manifest is not an activation mechanism. A candidate may neither
-change nor remove an existing destination policy blob through the managed product
-merge path. Renewing a required source locator uses the destination owner's
-configuration procedure too. The policy chooses scenario IDs and sources; it
-does not supply trusted human IDs or authenticate anyone by itself.
+protected configuration-review procedure. A candidate may neither change nor
+remove an existing policy blob through the managed product merge path. Renewing
+a required source locator also uses the owner's configuration procedure. The
+policy chooses scenario IDs and sources; it does not supply trusted human IDs
+or authenticate a person by itself.
 
-The plan records the authority remote, branch, exact base SHA, fixed file path
-and blob SHA (including proven absence). The normal merge preflight observes and
-fetches the live destination branch before this object is read. A fresh clone
-therefore reconstructs the same requirement even if the candidate removes every
-local declaration or cache. Apply observes/fetches the destination again under
-the existing mutation lock and rechecks the requirement, policy blob, live source
-and source tip before recording a merge start or calling the merge adapter.
-Loss or change of an active requirement invalidates the plan. Policy absence
-keeps the existing flow without a scenario-signoff gate or signoff-source query.
-All existing CI, authority, source identity and dependency checks remain in force.
+The fixed GitHub adapter reads this authority through authenticated
+`github.com` API calls: repository numeric ID and canonical name, exact live
+branch ref, commit, complete Git trees and the policy blob. It checks tree/ref
+identities, rejects truncation and non-regular policy paths, and verifies the
+decoded blob's Git object hash. Policy absence is reported only after a complete
+authenticated tree proves the path absent. Access errors, missing observations,
+malformed objects and unavailable verification are **not** policy absence.
 
-The independently provisioned private merge policy names the destination
-repository. Its owner-controlled configured Git transport is selected independently
-of the candidate manifest (matching `origin` first, otherwise a stable matching
-transport); choosing another target remote cannot redirect the policy lookup.
-Supported GitHub URLs and configured SSH aliases must match the declared repository
-path. Existing opaque local `origin` transports retain their legacy no-opt-in
-behavior. A destination-base mismatch is a blocker when a policy is active. The Git remote
-configuration is an owner-controlled input, like the executable and credentials,
-not an untrusted candidate declaration. Test fixtures rewrite its transport to a
-local bare repository without contacting a real forge.
+The planner binds host, repository ID, branch, base SHA, root tree SHA and blob
+SHA/content. These must agree with its independently observed repository identity
+and delivery base. Local remote names, SSH aliases, similar owner/repository
+paths, local manifests and candidate caches do not authenticate the destination.
+The ordinary Git source/target checks remain in place and cannot substitute an
+older local base for the live forge base.
 
-The merge planner consumes each required scenario against the stack's observed
-source SHA and current delta assessment. A wrong repository, scenario, source,
-new unassessed candidate, revoked source or changed delta blocks only that
-requested delivery. Standalone `status` and `assess` use the shared manifest's
-publication destination and base branch, or the chosen stack's actual target;
-without a manifest they use `origin/main`.
+Apply re-observes the live forge authority and human source under the existing
+mutation lock before recording a merge start or calling the merge adapter. A
+changed repository ID, base, policy, source or tip invalidates the plan. A fresh
+clone reconstructs the requirement from the forge rather than trusting a local
+primary manifest. A `scenario_acceptance` field in a local manifest is not an
+activation mechanism. Verified policy absence keeps the prior delivery flow
+without a signoff requirement or human-signoff query; inability to verify that
+absence blocks with `acceptance_authority_unavailable`.
 
-For standalone `status` and `assess`, an explicit `--head` or the result head in
-`--candidate` must identify the live invoking checkout's head. To assess a managed
-stack from another checkout, pass `--stack STACK`; it selects the live source
-branch from the canonical manifest. `--scenario ID` additionally checks the exact
-expected scenario. Reporting an old accepted SHA cannot masquerade as checking a
-new candidate. Receipt recording remains provenance-only and need not correspond
-to the current checkout.
+The destination repository comes from the independently configured private merge
+policy. Standalone checks without that configuration require an explicit GitHub
+repository URL in the checkout configuration; they never guess a forge endpoint
+from an SSH alias or local filesystem path. The executing adapter, user policy
+and credentials remain trusted host inputs; this local CLI is not a sandbox
+against rewriting its executable or trust configuration.
+
+For standalone `status` and `assess`, `--head` or the result head in `--candidate`
+must identify the live checkout's head. `--stack STACK` selects the live source
+branch of a managed stack instead. `--scenario ID` checks the expected scenario.
+An old accepted SHA cannot masquerade as a check of a new candidate. Recording
+provenance needs no authenticated source and grants no approval.

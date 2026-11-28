@@ -471,3 +471,46 @@ def merge_gates(requirements, profile, *, repository, head, actor, observe_sourc
             result['blockers'].append({'code': 'scenario_acceptance_unavailable',
                                        'scenario': required['id'], 'detail': str(exc)})
     return result
+
+
+
+def normalize_forge_authority(value, *, repository, branch, repository_id, base_sha=None):
+    """Accept only the fixed adapter's host/repository/ref/content-bound observation."""
+    if (not isinstance(value, dict) or type(value.get('schemaVersion')) is not int or value.get('schemaVersion') != 1
+            or value.get('kind') != 'githubAcceptanceAuthority' or value.get('host') != 'github.com'):
+        raise SyncwheelError('acceptance authority verification is unavailable or has a different host')
+    identity = value.get('repository')
+    if (not isinstance(identity, dict) or type(identity.get('id')) is not int
+            or identity['id'] <= 0 or type(repository_id) is not int or identity['id'] != repository_id
+            or str(identity.get('full_name', '')).casefold() != repository.casefold()):
+        raise SyncwheelError('authenticated acceptance repository identity mismatch')
+    if value.get('branch') != branch or value.get('path') != '.syncwheel/acceptance-policy.json':
+        raise SyncwheelError('authenticated acceptance branch or policy path mismatch')
+    observed_base = _sha(value.get('base_sha'))
+    if base_sha is not None and observed_base != base_sha:
+        raise SyncwheelError('authenticated acceptance base differs from the merge destination')
+    _sha(value.get('root_tree_sha'))
+    result = copy.deepcopy(value)
+    if value.get('state') == 'absent':
+        if value.get('blob_sha') is not None or value.get('content') is not None:
+            raise SyncwheelError('invalid authenticated policy absence')
+        result['requirements'] = None
+        return result
+    if value.get('state') != 'present':
+        raise SyncwheelError('policy absence was not proven by the authenticated source')
+    blob_sha = _sha(value.get('blob_sha'))
+    content = value.get('content')
+    if not isinstance(content, str):
+        raise SyncwheelError('authenticated policy content is unavailable')
+    payload = content.encode('utf-8')
+    hasher = hashlib.sha1 if len(blob_sha) == 40 else hashlib.sha256
+    if hasher(b'blob ' + str(len(payload)).encode() + b'\0' + payload).hexdigest() != blob_sha:
+        raise SyncwheelError('authenticated policy content does not match its blob')
+    try:
+        requirements = normalize_requirements(json.loads(content))
+    except (ValueError, TypeError) as exc:
+        raise SyncwheelError('invalid authenticated acceptance policy JSON') from exc
+    if requirements is None:
+        raise SyncwheelError('authenticated acceptance policy cannot be null')
+    result['requirements'] = requirements
+    return result
