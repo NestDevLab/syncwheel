@@ -215,6 +215,24 @@ class SharedGitTest(unittest.TestCase):
                 writer.apply(before, 'confirm', 'one')
         self.assertEqual(list(writer.snapshot()['state']['incidents']), ['two'])
 
+    def test_independent_authority_permission_and_local_forgery(self):
+        before = self.stores[0].snapshot()['authority_sha']
+        hook = self.remote / 'hooks/pre-receive'
+        hook.write_text('#!/bin/sh\nwhile read old new ref; do\n'
+                        '  if [ "$ref" = "refs/heads/recovery-authority" ]; then\n'
+                        '    echo "authority updates require independent maintainer" >&2\n'
+                        '    exit 1\n  fi\ndone\n')
+        hook.chmod(0o755)
+        forged = authority()
+        record(forged, 'forged', 'incident', incident='forged', actor='successor',
+               delivery='unrelated', proven=True, attributed=True, evidence='self-claim')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.provision(self.authority_ref, forged)
+        with self.assertRaisesRegex(SyncwheelError, 'independent authority attestation'):
+            run_command(self.stores[1], 'confirm', 'forged', apply=True)
+        self.assertEqual(self.stores[1].snapshot()['authority_sha'], before)
+        self.assertEqual(self.stores[1].snapshot()['state']['incidents'], {})
+
 
 class MergeEntryPointTest(unittest.TestCase):
     """Existing real merge handler; fake only the external forge observation."""
