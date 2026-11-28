@@ -172,10 +172,17 @@ class GithubLatestChecksTest(unittest.TestCase):
 
     def test_unavailable_policy_discovery_is_not_treated_as_absent(self):
         before = self.fixture.git('ls-remote', '--refs', 'origin')
+        local_refs = self.fixture.git('for-each-ref', '--format=%(refname) %(objectname)')
         unavailable = self.fixture.tmp / 'unavailable-public-mirror.git'
-        with self.assertRaisesRegex(self.syncwheel.SyncwheelError, 'Git operation refused'):
-            self.plan([self.check(101)], required=True, transport=unavailable)
+        plan = self.plan([self.check(101)], required=True, transport=unavailable)
+        self.assertEqual(plan['status'], 'blocked')
+        self.assertEqual(plan['actorRecovery']['status'], 'blocked')
+        self.assertIsNone(plan['actorRecovery']['policy'])
+        self.assertIn('Git operation refused', plan['actorRecovery']['detail'])
+        self.assertIn({'code': 'attributed_delivery_recovery',
+                       'detail': plan['actorRecovery']['detail']}, plan['blockers'])
         self.assertEqual(self.fixture.git('ls-remote', '--refs', 'origin'), before)
+        self.assertEqual(self.fixture.git('for-each-ref', '--format=%(refname) %(objectname)'), local_refs)
 
     def test_new_success_supersedes_old_cancelled_regardless_of_input_order(self):
         old = self.check(101, 'CANCELLED')

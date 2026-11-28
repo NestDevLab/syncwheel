@@ -142,10 +142,23 @@ the integration projection must be on the integration branch
 (`integration_not_validated` otherwise). A clone whose integration is often
 behind can set `--integration advisory` on the policy: missing commits or a
 missing local integration ref become a warning, and the PR is validated by its
-own checks, pinned head and live base only. The plan also reports a primary
-staging-layout mismatch as advisory; it never creates a local projection ref to
-satisfy this check. Global validation and integration operations retain their
-primary-layout requirements. Declared membership, published source identity,
+own checks, pinned head and live base only. A primary staging-layout mismatch
+is advisory only when the primary is the canonical delivery target and its
+integration ref is absent locally, in remote tracking and on the canonical
+remote. A detached or unrelated primary, or an existing integration ref, blocks
+publication and remains visible in the plan's top-level warnings.
+
+The absent-projection layout exception requires `.syncwheel/manifest.json` from the fetched
+delivery target commit. That commit must equal the forge's observed PR base OID;
+an older ancestor is insufficient for this exception. The published contract
+must authorize `source_change`, name the same target, publication remote and
+integration, and bound the working authority without widening it. Uncommitted
+primary or candidate declarations cannot grant this exception. The plan records
+its immutable source and authorization reasons in `primaryProjectionEvidence`.
+Missing or invalid published policy cannot authorize a layout exception. Refresh stale forge/base
+observations through ordinary delivery before retrying. No local projection ref
+is created. Global `validate`, `check` and composition retain strict primary-layout
+requirements. Declared membership, published source identity,
 real dependencies, authority and forge-required checks still block in both modes.
 CI must also pass unless the clone-local policy explicitly declares
 `checks: "none"`:

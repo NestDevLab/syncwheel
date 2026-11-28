@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.53.7 - 2026-11-28
+
+- Confine advisory absent-projection delivery to the authorized primary target with genuinely absent integration refs. Bind its authority to the exact forge-observed published target, reject local authority elevation and surface blocked layout anomalies in top-level warnings.
+- Retain a blocked merge preview when recovery-authority discovery is unavailable, preserving the original forge failure and treating policy as unknown rather than absent.
+
 ## 0.53.6 - 2026-11-28
 
 - Add an explicitly opted-in attributed PR recovery gate with independent authority records, cross-lane actor review obligations, shared exact-lease state, and native uncertain-publication reconciliation. Keep warnings and unrelated work outside delivery penalties.

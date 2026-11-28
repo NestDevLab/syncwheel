@@ -647,6 +647,7 @@ class MergeEntryPointTest(unittest.TestCase):
         self.fixture.git('switch', '-q', 'main')
         self.fixture.git('branch', '-D', 'main-integration')
         self.fixture.manifest['defaults']['integration_membership'] = 'required'
+        self.fixture.publish_delivery_policy()
         self.fixture.manifest_path.write_text(json.dumps(self.fixture.manifest) + '\n')
         self.profile['github_pr_merge'].update(integration='advisory', allowed_bypasses=[])
         self.write_profile()

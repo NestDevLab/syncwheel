@@ -101,6 +101,25 @@ class GithubPrMergeTest(unittest.TestCase):
             raise AssertionError(result.stderr or result.stdout)
         return result.stdout.strip()
 
+    def publish_delivery_policy(self):
+        """Publish owner control data at the target and incorporate its exact base."""
+        canonical = copy.deepcopy(self.manifest)
+        canonical['stacks'] = []
+        canonical['integration']['stacks'] = []
+        self.manifest_path.write_text(json.dumps(canonical) + '\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-qm', 'Publish repository delivery policy')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', 'main')
+        self.git('switch', '-q', 'pr/feature')
+        self.git('merge', '--no-edit', 'main')
+        previous = self.head
+        self.head = self.git('rev-parse', 'HEAD')
+        self.manifest['stacks'][0]['commits'] = [previous, self.head]
+        self.manifest['stacks'][0]['integration_commits'] = [previous, self.head]
+        self.git('push', '-q', 'origin', 'pr/feature')
+        self.git('switch', '-q', 'main')
+
     def policy(self):
         return {
             'enabled': True,

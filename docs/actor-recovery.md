@@ -55,6 +55,10 @@ same repository is governed. It needs no actor binding or recovery reservation.
 Moving a target into or out of scope after preview invalidates that preview;
 publication must not silently gain or lose the applicable gate.
 
+If owner-policy discovery is unavailable, PR preview retains a blocked recovery
+finding with unknown policy and the original source error. This is distinct from
+verified absence of opt-in and does not discard other blocked forge findings.
+
 The maintainer verifies identity through the project's authenticated agent/session
 binding and the original work evidence. `USER`, forge account, device, reporter,
 lane owner, local receipt, and an agent's own claimed name do not prove the

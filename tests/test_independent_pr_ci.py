@@ -26,6 +26,9 @@ class IndependentPrCiTest(unittest.TestCase):
         self.fixture.manifest['authority'] = {
             'mode': 'ai-managed', 'allow': ['source_change'], 'deny': [],
         }
+        # Authority is published on the actual target, not invented in the
+        # selected working manifest. Incorporate that target without rewriting.
+        self.fixture.publish_delivery_policy()
         self.policy = self.fixture.policy()
         self.policy.update(integration='advisory', allowed_bypasses=[])
         self.observation = self.fixture.observation(decision='APPROVED', checks=[{
@@ -37,7 +40,7 @@ class IndependentPrCiTest(unittest.TestCase):
             'required_status_checks': {'contexts': ['required-ci']},
         }
 
-    def plan(self, *, floor=False):
+    def plan(self, *, floor=False, observation_error=None):
         f = self.fixture
         f.manifest_path.write_text(json.dumps(f.manifest) + '\n')
         path = f.repo / '.syncwheel/profile.local.json'
@@ -48,7 +51,8 @@ class IndependentPrCiTest(unittest.TestCase):
         if floor:
             report = apply_required_floor(report, {'integration_validation': 'required'},
                                           authority='verified required integration contract')
-        with mock.patch.object(SW, 'github_adapter_request', return_value=self.observation), \
+        with mock.patch.object(SW, 'github_adapter_request', return_value=self.observation,
+                               side_effect=observation_error), \
              mock.patch.object(SW, 'execution_policy_report', return_value=report):
             return SW.build_github_pr_merge_plan(f.repo, f.manifest, f.manifest_path,
                                                 'feature', f.args())
@@ -67,6 +71,124 @@ class IndependentPrCiTest(unittest.TestCase):
         self.assertIn('primary_projection_not_validated', {item['code'] for item in plan['warnings']})
         self.assertEqual(f.git('for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads'), before)
         self.assertIsNone(SW.ref_tip(f.repo, 'refs/heads/main-integration'))
+
+    def test_unrelated_and_detached_primaries_block_with_or_without_projection(self):
+        f = self.fixture
+        for branch in ('unrelated', 'DETACHED'):
+            for projection_present in (False, True):
+                with self.subTest(branch=branch, projection_present=projection_present):
+                    f.git('switch', '-q', 'main')
+                    if SW.ref_tip(f.repo, 'refs/heads/unrelated') is None:
+                        f.git('branch', 'unrelated', 'main')
+                    if projection_present:
+                        f.git('branch', 'main-integration', f.head)
+                    if branch == 'DETACHED':
+                        f.git('switch', '--detach', '-q', f.base)
+                    else:
+                        f.git('switch', '-q', branch)
+                    plan = self.plan()
+                    if projection_present:
+                        f.git('branch', '-D', 'main-integration')
+                    self.assertIn('primary_projection_invalid', self.codes(plan))
+                    self.assertIn('primary_projection_not_validated', {w['code'] for w in plan['warnings']})
+
+    def test_target_with_existing_projection_is_not_an_absence_exception(self):
+        self.fixture.git('branch', 'main-integration', self.fixture.head)
+        self.assertIn('primary_projection_invalid', self.codes(self.plan()))
+
+    def test_remote_projection_cannot_be_hidden_by_removing_local_ref(self):
+        self.fixture.git('push', '-q', 'origin', 'pr/feature:main-integration')
+        self.assertIn('primary_projection_invalid', self.codes(self.plan()))
+
+    def test_working_primary_cannot_elevate_published_authority(self):
+        f = self.fixture
+        f.manifest['authority']['allow'].append('runtime_change')
+        plan = self.plan()
+        self.assertIn('primary_projection_invalid', self.codes(plan))
+        self.assertFalse(plan['primaryProjectionEvidence']['authorized'])
+        self.assertIn('working authority exceeds published target policy', plan['primaryProjectionEvidence']['reasons'])
+
+    def test_stale_forge_base_cannot_authorize_current_git_target(self):
+        self.observation['pr']['baseRefOid'] = self.fixture.git('rev-parse', 'main^')
+        plan = self.plan()
+        self.assertIn('primary_projection_invalid', self.codes(plan))
+        self.assertIn('delivery target is not bound to the current forge base',
+                      plan['primaryProjectionEvidence']['reasons'])
+
+    def test_published_human_policy_cannot_be_elevated_by_primary(self):
+        f = self.fixture
+        canonical = json.loads(f.git('show', 'main:.syncwheel/manifest.json'))
+        canonical['authority'] = {'mode': 'human-gated', 'allow': [], 'deny': []}
+        f.manifest_path.write_text(json.dumps(canonical) + '\n')
+        f.git('add', '.syncwheel/manifest.json')
+        f.git('commit', '-qm', 'Require human authority')
+        f.git('push', '-q', 'origin', 'main')
+        self.observation['pr']['baseRefOid'] = f.git('rev-parse', 'HEAD')
+        plan = self.plan()
+        self.assertIn('primary_projection_invalid', self.codes(plan))
+        self.assertIn('published target does not authorize source changes',
+                      plan['primaryProjectionEvidence']['reasons'])
+
+    def test_selected_integration_cannot_invent_compliance(self):
+        self.fixture.git('switch', '-qc', 'unrelated')
+        self.fixture.manifest['integration']['branch'] = 'unrelated'
+        self.assertIn('primary_projection_invalid', self.codes(self.plan()))
+
+    def test_preview_preserves_primary_head_index_and_dirty_content(self):
+        f = self.fixture
+        (f.repo / 'base.txt').write_text('unstaged primary work\n')
+        (f.repo / 'staged.txt').write_text('staged primary work\n')
+        (f.repo / 'untracked.txt').write_text('untracked primary work\n')
+        f.git('add', 'staged.txt')
+        self.plan()
+        before = (f.git('rev-parse', 'HEAD'), (f.repo / '.git/index').read_bytes(),
+                  f.git('diff', '--binary'), (f.repo / 'untracked.txt').read_bytes())
+        plan = self.plan()
+        self.assertEqual('ready', plan['status'], plan['blockers'])
+        after = (f.git('rev-parse', 'HEAD'), (f.repo / '.git/index').read_bytes(),
+                 f.git('diff', '--binary'), (f.repo / 'untracked.txt').read_bytes())
+        self.assertEqual(before, after)
+
+    def assert_observation_failure_is_read_only(self, code, *, error=None):
+        f = self.fixture
+        # Materialize the selected private configuration before measuring.
+        self.plan()
+        before = (f.git('for-each-ref', '--format=%(refname) %(objectname)'),
+                  f.git('rev-parse', 'HEAD'), (f.repo / '.git/index').read_bytes(),
+                  f.manifest_path.read_bytes(), f.git('status', '--porcelain'))
+        plan = self.plan(observation_error=error)
+        self.assertEqual('blocked', plan['status'])
+        self.assertIn(code, self.codes(plan))
+        self.assertFalse(plan['primaryProjectionEvidence']['sourceVerified'])
+        self.assertFalse(plan['primaryProjectionEvidence']['authorized'])
+        self.assertIsNone(plan['primaryProjectionEvidence']['fetchedSha'])
+        self.assertEqual(before, (f.git('for-each-ref', '--format=%(refname) %(objectname)'),
+                                f.git('rev-parse', 'HEAD'), (f.repo / '.git/index').read_bytes(),
+                                f.manifest_path.read_bytes(), f.git('status', '--porcelain')))
+        self.assertEqual([], list((f.repo / '.syncwheel/ledger').rglob('*')))
+        return plan
+
+    def test_missing_pr_returns_blocked_plan_without_effects(self):
+        self.observation.update(pr=None, selection={'count': 0})
+        self.assert_observation_failure_is_read_only('pull_request_not_found')
+
+    def test_ambiguous_pr_returns_blocked_plan_without_effects(self):
+        self.observation.update(pr=None, selection={'count': 2})
+        self.assert_observation_failure_is_read_only('pull_request_ambiguous')
+
+    def test_observation_error_returns_blocked_plan_without_effects(self):
+        self.assert_observation_failure_is_read_only(
+            'github_observation_failed', error=SW.SyncwheelError('fixture observation failed'))
+
+    def test_recovery_discovery_error_preserves_the_blocked_observation_plan(self):
+        with mock.patch.object(SW._actor_recovery, '_live_policy',
+                               side_effect=SW.SyncwheelError('fixture recovery authority unavailable')):
+            plan = self.assert_observation_failure_is_read_only(
+                'github_observation_failed', error=SW.SyncwheelError('fixture observation failed'))
+        self.assertEqual(plan['actorRecovery'], {
+            'status': 'blocked', 'detail': 'fixture recovery authority unavailable', 'policy': None,
+        })
+        self.assertIn('attributed_delivery_recovery', self.codes(plan))
 
     def test_global_validation_still_requires_the_primary_integration_layout(self):
         self.plan()
