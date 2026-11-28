@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from syncwheel_errors import SyncwheelError
+from syncwheel_manifest import INTEGRATION_MEMBERSHIP_REQUIRED
 from syncwheel_policy import FIELD_VALUES, resolve_preferences
 from syncwheel_worktree_policy import lane_document
 
@@ -256,3 +257,43 @@ def candidate_checks(checks, head):
 
 def check_matches_candidate(check, head):
     return isinstance(check, dict) and check.get('headSha') == head
+
+
+def primary_projection_findings(primary, integration_validation='required'):
+    """A PR's optional staging layout is observable, never synthetic Git state."""
+    if primary['compliant']:
+        return [], []
+    detail = (
+        f"primary worktree branch mismatch at {primary['path']}: "
+        f"expected one of {primary['expected_branches']!r}, found {primary['branch']!r}"
+    )
+    return ([], [detail]) if integration_validation == 'advisory' else ([detail], [])
+
+
+def integration_findings(manifest, stack, integration_validation, *, branch_available, missing):
+    """Decide integration gates from observed refs; membership is a separate floor."""
+    integration = manifest.get('integration') or {}
+    member = stack.get('id') in integration.get('stacks', [])
+    if manifest['defaults'].get('integration_membership') == INTEGRATION_MEMBERSHIP_REQUIRED and not member:
+        return [{'code': 'integration_membership',
+                 'detail': 'stack is not present in required integration'}], []
+    if not member:
+        return [], []
+    if not branch_available and integration_validation != 'advisory':
+        return [{'code': 'integration_missing', 'detail': 'integration branch is missing'}], []
+    if missing or not branch_available:
+        if integration_validation == 'advisory':
+            detail = (
+                f"{len(missing)} stack commit(s) are absent from {integration.get('branch')}; "
+                'the merge policy declares integration validation advisory'
+            ) if branch_available else (
+                'integration branch is missing; the merge policy declares integration '
+                'validation advisory and delivery is evaluated against the actual PR checks'
+            )
+            return [], [{'code': 'integration_not_validated', 'detail': detail,
+                         'commits': list(missing)}]
+        return [{'code': 'integration_not_validated',
+                 'detail': f'stack commit is absent from integration: {commit}; rebuild the integration, '
+                           'or declare integration validation advisory in the clone-local merge policy'}
+                for commit in missing], []
+    return [], []
