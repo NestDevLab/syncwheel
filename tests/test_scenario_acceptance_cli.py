@@ -23,11 +23,15 @@ class ScenarioAcceptanceCliTest(unittest.TestCase):
         self.tmp = self.f.fixture.tmp
         self.cli = self.f.fixture.run_cli
         self.head = self.f.fixture.git('rev-parse', 'HEAD')
+        self.authority_remote = self.tmp / 'owner-policy.git'
+        self.f.fixture.git('clone', '--bare', '-q', str(self.f.fixture.repo), str(self.authority_remote))
         manifest = self.f.fixture.read_manifest()
-        canonical = manifest['defaults']['canonical_remote']
+        canonical = manifest['defaults']['publication_remote']
         configured = self.f.fixture.git('remote').splitlines()
         self.f.fixture.git('remote', 'set-url' if canonical in configured else 'add', canonical,
                            'https://github.com/example/project.git')
+        self.f.fixture.git('config', '--add', 'url.' + str(self.authority_remote) + '.insteadOf', 'https://github.com/example/project.git')
+        self.f.fixture.git('config', '--add', 'url.' + str(self.authority_remote) + '.insteadOf', 'https://github.com/unrelated/consumer.git')
         self.receipt = fixture_receipt()
         self.receipt['binding'] = {'revisions': [self.head]}
         self.source = SourceFixture(self.receipt)
@@ -94,8 +98,9 @@ print(json.dumps(value))
         self.f.fixture.git('clone', '-q', str(self.f.fixture.repo), str(clone))
         self.assertFalse((clone / '.syncwheel/profile.local.json').exists())
         import subprocess
-        subprocess.run(['git', '-C', str(clone), 'remote', 'set-url',
-                        self.f.fixture.read_manifest()['defaults']['canonical_remote'],
+        subprocess.run(['git', '-C', str(clone), 'remote', 'set-url', 'origin',
+                        'https://github.com/example/project.git'], check=True)
+        subprocess.run(['git', '-C', str(clone), 'config', 'url.' + str(self.authority_remote) + '.insteadOf',
                         'https://github.com/example/project.git'], check=True)
         result = self.command('status', '--source', str(self.locator), cwd=clone)
         self.assertEqual(result['status'], 'applicable')
@@ -150,7 +155,7 @@ print(json.dumps(value))
         self.assertIn('source_author_indistinguishable_from_operator', result['source_reasons'])
 
     def test_unrelated_repository_scenario_and_old_candidate_cannot_reuse_signoff(self):
-        canonical = self.f.fixture.read_manifest()['defaults']['canonical_remote']
+        canonical = self.f.fixture.read_manifest()['defaults']['publication_remote']
         self.f.fixture.git('remote', 'set-url', canonical, 'https://github.com/unrelated/consumer.git')
         mismatch = self.command('status', '--receipt', str(self.input), expected=1)
         self.assertIn('repository_identity_mismatch', mismatch['source_reasons'])

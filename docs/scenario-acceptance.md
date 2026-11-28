@@ -136,49 +136,59 @@ The positive automated smoke uses controlled fixture identities and a read-only
 fixture `gh` executable. It proves command wiring and trust checks, not the
 identity of any real human or activation in a real repository.
 
-## Optional canonical merge requirement
+## Optional destination-owned merge requirement
 
-There is no acceptance merge gate by default. Only the maintainer's canonical
-primary manifest can require scenarios for managed GitHub merges:
+There is no acceptance merge gate by default. Only a regular JSON policy file
+`.syncwheel/acceptance-policy.json` at the **live destination branch's verified
+base commit** can require scenarios for managed GitHub merges:
 
 ```json
 {
-  "scenario_acceptance": {
-    "repository": "example/project",
-    "scenarios": [
-      {"id": "checkout-confirmation", "source": {
-        "kind": "github_review", "repository": "example/project",
-        "pull_request": 7, "review_id": 17
-      }}
-    ]
-  }
+  "repository": "example/project",
+  "scenarios": [
+    {"id": "checkout-confirmation", "source": {
+      "kind": "github_review", "repository": "example/project",
+      "pull_request": 7, "review_id": 17
+    }}
+  ]
 }
 ```
 
-Provision this declaration through the repository's existing authority and
-configuration-review procedure. A candidate receipt, private profile or selected
-manifest overlay cannot activate, remove or replace it. A renewal using a new
-source review requires updating its canonical locator through the same procedure.
-The declaration chooses scenario IDs and sources; it does not supply trusted
-human IDs or authenticate anyone by itself.
+The destination owner provisions or changes this file through its separately
+protected configuration-review procedure. It is read from the immutable Git
+object fetched at the exact live delivery base, not from the candidate's files,
+primary checkout, selected manifest or private profile. A `scenario_acceptance`
+field in a local manifest is not an activation mechanism. A candidate may neither
+change nor remove an existing destination policy blob through the managed product
+merge path. Renewing a required source locator uses the destination owner's
+configuration procedure too. The policy chooses scenario IDs and sources; it
+does not supply trusted human IDs or authenticate anyone by itself.
 
-The repository identity is derived from the one configured URL of the canonical
-remote (the canonical manifest's `defaults.canonical_remote`, or `origin` when
-undeclared). Supported GitHub HTTPS/SSH URLs identify the source namespace.
-Missing, ambiguous or unrelated identity cannot satisfy a verified signoff;
-configuring a merge-policy repository string alone does not establish identity.
-The Git remote configuration is an owner-controlled input, like the executable
-and credentials, not an untrusted candidate declaration. Test fixtures can rewrite
-that transport to their local bare repository without contacting a real forge.
+The plan records the authority remote, branch, exact base SHA, fixed file path
+and blob SHA (including proven absence). The normal merge preflight observes and
+fetches the live destination branch before this object is read. A fresh clone
+therefore reconstructs the same requirement even if the candidate removes every
+local declaration or cache. Apply observes/fetches the destination again under
+the existing mutation lock and rechecks the requirement, policy blob, live source
+and source tip before recording a merge start or calling the merge adapter.
+Loss or change of an active requirement invalidates the plan. Policy absence
+keeps the existing flow without a scenario-signoff gate or signoff-source query.
+All existing CI, authority, source identity and dependency checks remain in force.
 
-The merge planner consumes each canonical scenario against the stack's observed
+The source namespace is derived from the one configured URL of the destination
+remote. Supported GitHub HTTPS/SSH URLs identify that namespace; missing,
+ambiguous or unrelated identity cannot satisfy a required signoff. Configuring a
+merge-policy repository string alone does not establish identity. The Git remote
+configuration is an owner-controlled input, like the executable and credentials,
+not an untrusted candidate declaration. Test fixtures rewrite its transport to a
+local bare repository without contacting a real forge.
+
+The merge planner consumes each required scenario against the stack's observed
 source SHA and current delta assessment. A wrong repository, scenario, source,
 new unassessed candidate, revoked source or changed delta blocks only that
-requested delivery. The plan includes the consumed evidence. Apply recomputes
-it and rechecks canonical configuration and source tip under the existing
-mutation lock before recording a merge start or calling the merge adapter.
-It refuses stale evidence rather than using a positive preview after revocation.
-This does not relax any other authority, CI or review condition.
+requested delivery. Standalone `status` and `assess` use the shared manifest's
+publication destination and base branch, or the chosen stack's actual target;
+without a manifest they use `origin/main`.
 
 For standalone `status` and `assess`, an explicit `--head` or the result head in
 `--candidate` must identify the live invoking checkout's head. To assess a managed

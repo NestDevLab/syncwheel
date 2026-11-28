@@ -20,14 +20,28 @@ A = S._acceptance
 class AcceptanceMergeTest(unittest.TestCase):
     def setUp(self):
         self.f = merge_fixture.GithubPrMergeTest()
+        original_git = self.f.git
+        def initialize_owner_policy(*args):
+            if args == ('push', '-qu', 'origin', 'main') and self._testMethodName != 'test_no_opt_in_leaves_legacy_delivery_without_source_queries':
+                receipt = fixture_receipt()
+                path = self.f.repo / '.syncwheel/acceptance-policy.json'
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(json.dumps({'repository': 'example/project', 'scenarios': [
+                    {'id': receipt['scenario_id'], 'source': receipt['source']}]}))
+                original_git('add', '.syncwheel/acceptance-policy.json')
+                original_git('commit', '-qm', 'Owner acceptance policy')
+            return original_git(*args)
+        self.f.git = initialize_owner_policy
         self.f.setUp()
+        self.f.git = original_git
         self.addCleanup(self.f.tearDown)
         self.receipt = fixture_receipt()
         self.receipt['binding'] = {'revisions': [self.f.head]}
         self.source = SourceFixture(self.receipt)
         self.source.review['commit_id'] = self.f.head
         self.f.git('remote', 'set-url', 'origin', 'https://github.com/example/project.git')
-        self.f.git('config', 'url.' + str(self.f.remote) + '.insteadOf', 'https://github.com/example/project.git')
+        self.f.git('config', '--add', 'url.' + str(self.f.remote) + '.insteadOf', 'https://github.com/example/project.git')
+        self.f.git('config', '--add', 'url.' + str(self.f.remote) + '.insteadOf', 'https://github.com/unrelated/consumer.git')
         self.f.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         self.f.manifest['scenario_acceptance'] = {
             'repository': 'example/project',
@@ -105,8 +119,9 @@ class AcceptanceMergeTest(unittest.TestCase):
         self.assertEqual(result['acceptanceEvidence']['blockers'][0]['code'], 'acceptance_repository_mismatch')
         self.assertEqual(self.source_reads, 0)
         self.f.git('remote', 'set-url', 'origin', 'https://github.com/example/project.git')
-        self.f.manifest['scenario_acceptance']['scenarios'][0]['id'] = 'another-required-scenario'
-        self.write_manifest()
+        payload = json.loads(self.source.review['body'])
+        payload['scenario_id'] = 'another-required-scenario'
+        self.source.review['body'] = json.dumps(payload)
         result = self.plan()
         self.assertEqual(result['status'], 'blocked')
         self.assertIn('scenario_identity_mismatch', result['acceptanceEvidence']['scenarios'][0]['source_reasons'])
@@ -142,6 +157,68 @@ class AcceptanceMergeTest(unittest.TestCase):
         self.assertEqual(self.f.git('rev-parse', 'pr/feature'), before)
         self.assertFalse(any(e['type'] == 'github_pr_merge_started'
                              for e in S.load_ledger_events(self.f.repo, self.f.manifest_path)))
+
+    def test_fresh_clone_cannot_remove_requirement_from_its_primary_manifest(self):
+        clone = self.f.tmp / 'fresh-candidate'
+        self.f.git('clone', '-q', str(self.f.repo), str(clone))
+        def git(*args):
+            return subprocess.run(['git', '-C', str(clone), *args], check=True, text=True, capture_output=True)
+        git('branch', 'pr/feature', 'origin/pr/feature')
+        git('remote', 'set-url', 'origin', 'https://github.com/example/project.git')
+        git('config', 'url.' + str(self.f.remote) + '.insteadOf', 'https://github.com/example/project.git')
+        local = copy.deepcopy(self.f.manifest)
+        local.pop('scenario_acceptance', None)
+        path = clone / '.syncwheel/manifest.json'
+        path.write_text(json.dumps(local))
+        (clone / '.syncwheel/profile.local.json').write_text(self.profile_path.read_text())
+        plan = S.build_github_pr_merge_plan(clone, local, path, 'feature', self.f.args())
+        self.assertEqual(plan['status'], 'ready', plan['blockers'])
+        self.source.review['state'] = 'DISMISSED'
+        plan = S.build_github_pr_merge_plan(clone, local, path, 'feature', self.f.args())
+        self.assertEqual(plan['status'], 'blocked')
+        self.assertEqual(plan['acceptanceEvidence']['scenarios'][0]['status'], 'source_unverified')
+        self.assertEqual(plan['acceptanceAuthority']['base_sha'], self.f.base)
+        self.assertIsNotNone(plan['acceptanceAuthority']['blob_sha'])
+
+    def test_candidate_cannot_remove_protected_owner_policy_blob(self):
+        self.f.git('switch', '-q', 'pr/feature')
+        self.f.git('rm', '-q', '.syncwheel/acceptance-policy.json')
+        self.f.git('commit', '-qm', 'Candidate removes policy')
+        head = self.f.git('rev-parse', 'HEAD')
+        self.f.git('push', '-q', 'origin', 'pr/feature')
+        self.f.manifest['stacks'][0]['commits'].append(head)
+        self.write_manifest()
+        self.observed['pr']['headRefOid'] = head
+        profile = json.loads(self.profile_path.read_text())
+        profile['github_pr_merge']['integration'] = 'advisory'
+        self.profile_path.write_text(json.dumps(profile))
+        plan = self.plan()
+        self.assertEqual(plan['status'], 'blocked')
+        self.assertIn('acceptance_policy_changed_by_candidate', [b['code'] for b in plan['blockers']])
+
+    def test_remote_owner_policy_loss_between_plan_and_apply_is_refused(self):
+        preview = self.plan()
+        env = dict(os.environ, GIT_INDEX_FILE=str(self.f.tmp / 'owner-policy-index'))
+        def plumbing(*args, input=None):
+            r = subprocess.run(['git', *args], cwd=self.f.repo, env=env, input=input,
+                               text=True, capture_output=True, check=True)
+            return r.stdout.strip()
+        plumbing('read-tree', self.f.base)
+        plumbing('update-index', '--force-remove', '.syncwheel/acceptance-policy.json')
+        tree = plumbing('write-tree')
+        changed = plumbing('commit-tree', tree, '-p', self.f.base, input='Owner removes policy\n')
+        self.f.git('push', '-q', 'origin', changed + ':refs/heads/owner-policy-removal')
+        original = S.channel_mutation_lock
+        @contextlib.contextmanager
+        def race(*args, **kwargs):
+            with original(*args, **kwargs):
+                if len(args) > 2 and args[2] == 'github-pr-merge-authority':
+                    self.f.git('--git-dir=' + str(self.f.remote), 'update-ref', 'refs/heads/main', changed, self.f.base)
+                yield
+        with mock.patch.object(S, 'channel_mutation_lock', side_effect=race):
+            with self.assertRaisesRegex(S.SyncwheelError, 'scenario acceptance changed before merge'):
+                S.command_stack_merge_pr(self.f.args(apply=True, plan_digest=preview['planDigest']))
+        self.assertFalse(any(r['operation'] == 'merge' for r in self.requests))
 
     def test_public_cli_preview_apply_and_revocation_use_real_entrypoints(self):
         bin_dir = self.f.tmp / 'public-bin'
