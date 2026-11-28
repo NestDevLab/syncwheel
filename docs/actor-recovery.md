@@ -50,6 +50,11 @@ in the preview and is checked at reservation and effect start. Changing targets
 or any other field cannot turn a gate into a no-op. Stale writers
 re-read and reapply their intent; there is no automatic merge or retry.
 
+An unmapped PR target remains outside this gate even when another target in the
+same repository is governed. It needs no actor binding or recovery reservation.
+Moving a target into or out of scope after preview invalidates that preview;
+publication must not silently gain or lose the applicable gate.
+
 The maintainer verifies identity through the project's authenticated agent/session
 binding and the original work evidence. `USER`, forge account, device, reporter,
 lane owner, local receipt, and an agent's own claimed name do not prove the
@@ -150,6 +155,12 @@ to other work refs synchronize work and remain ordinary operations. Ambiguous
 default or wildcard pushes on the configured product remote refuse until their
 scope is explicit. Other remotes and unmapped product targets are outside this
 opt-in contract. Do not map work refs as product targets merely to record warnings.
+
+Before Git starts a push, every effective destination of a multi-`pushurl` remote
+is inspected. A protected destination refuses the entire product push before an
+earlier destination can change. Explicit work refs that are ungoverned at every
+destination retain ordinary fanout behavior, as do repositories without opt-in.
+Recovery-state transactions themselves require one canonical destination.
 
 Raw Git, another forge client, CI release jobs, external deployment and runtime
 installs are not intercepted. Server protection and their owners must enforce

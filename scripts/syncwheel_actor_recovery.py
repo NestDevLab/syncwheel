@@ -234,10 +234,10 @@ def repository_profile(root, remote='origin'):
     common serialization point for policy changes, holds and effect start.
     """
     reader = GitRecoveryStore(root, remote, STATE_REF, 'refs/heads/discovery-placeholder', 'discovery')
-    try:
-        transport = reader.git('remote', 'get-url', '--push', remote)
-    except SyncwheelError:
-        transport = remote
+    destinations = push_destinations(root, remote)
+    if len(destinations) != 1:
+        raise SyncwheelError('repository recovery requires one canonical push destination')
+    transport = destinations[0]
     lines = reader.git('ls-remote', '--refs', transport, STATE_REF).splitlines()
     if not lines:
         return {}
@@ -264,6 +264,25 @@ def repository_profile(root, remote='origin'):
 
 def _live_policy(root, plan):
     return repository_profile(root, plan.get('recoveryRemote') or plan.get('targetRemote') or 'origin')
+
+
+def _scoped_policy(profile, plan):
+    policy = profile.get('actor_recovery')
+    if policy is None or 'refs/heads/' + plan['baseBranch'] not in policy['product_refs']:
+        return None
+    return policy
+
+
+def push_destinations(root, remote):
+    """All effective push URLs, including pushInsteadOf rewrites, before effects."""
+    reader = GitRecoveryStore(root, remote, STATE_REF, 'refs/heads/discovery-placeholder', 'discovery')
+    try:
+        destinations = reader.git('remote', 'get-url', '--push', '--all', remote).splitlines()
+    except SyncwheelError:
+        destinations = [remote]  # An explicit URL/path, rather than a remote alias.
+    if not destinations or any(not value.strip() for value in destinations):
+        raise SyncwheelError('publication push destination is unavailable')
+    return list(dict.fromkeys(destinations))
 
 
 def merge_binding(store, profile, plan, reference):
@@ -315,10 +334,10 @@ def reconcile_reference(root, profile, reference, observe):
 def reserve_merge(root, profile, plan, *, reference, review=None):
     profile = _live_policy(root, plan)
     expected = (plan.get('actorRecovery') or {}).get('policy')
-    if expected != profile.get('actor_recovery'):
+    scoped = _scoped_policy(profile, plan)
+    if expected != scoped:
         raise SyncwheelError('complete repository publication policy changed after preview')
-    if (profile.get('actor_recovery') is None or 'refs/heads/' + plan['baseBranch']
-            not in profile['actor_recovery'].get('product_refs', {})):
+    if scoped is None:
         return None
     store = from_profile(root, profile)
     if store is None:
@@ -330,9 +349,10 @@ def reserve_merge(root, profile, plan, *, reference, review=None):
 
 def start_merge(root, plan, reference):
     profile = _live_policy(root, plan)
-    if (plan.get('actorRecovery') or {}).get('policy') != profile.get('actor_recovery'):
+    scoped = _scoped_policy(profile, plan)
+    if (plan.get('actorRecovery') or {}).get('policy') != scoped:
         raise SyncwheelError('repository publication policy changed before effect start')
-    if not profile:
+    if scoped is None:
         return None
     store = from_profile(root, profile)
     snapshot, _ = merge_binding(store, profile, plan, reference)
@@ -427,25 +447,27 @@ def guard_product_push(root, profile, command):
     if selected_remote is None and positional:
         selected_remote = positional.pop(0)
     remote = selected_remote or 'origin'
-    profile = repository_profile(root, remote)
-    config = profile.get('actor_recovery')
-    if config is None:
-        return
-    specs = positional
-    ambiguous = not specs or any(option in tokens for option in ('--all', '--mirror', '--prune'))
-    targets = config['product_refs']
-    for spec in specs:
-        target = spec.lstrip('+').split(':')[-1]
-        if '*' in target:
-            ambiguous = True
-        if not target.startswith('refs/'):
-            target = 'refs/heads/' + target
-        if target in (STATE_REF, config['authority_ref']):
-            raise SyncwheelError('repository recovery authority requires its dedicated owner path')
-        if target in targets:
-            raise SyncwheelError('product target requires attributed PR publication via stack merge-pr')
-    if ambiguous:
-        raise SyncwheelError('cannot prove push excludes opted-in product targets; use explicit work refs')
+    # Git fans out one named push to every pushurl. Inspect all of them before
+    # the runner starts Git, so a later protected destination cannot be reached
+    # after an earlier unprotected destination has already been changed.
+    for destination in push_destinations(root, remote):
+        profile = repository_profile(root, destination)
+        config = profile.get('actor_recovery')
+        if config is None:
+            continue
+        ambiguous = not positional or any(option in tokens for option in ('--all', '--mirror', '--prune'))
+        for spec in positional:
+            target = spec.lstrip('+').split(':')[-1]
+            if '*' in target:
+                ambiguous = True
+            if not target.startswith('refs/'):
+                target = 'refs/heads/' + target
+            if target in (STATE_REF, config['authority_ref']):
+                raise SyncwheelError('repository recovery authority requires its dedicated owner path')
+            if target in config['product_refs']:
+                raise SyncwheelError('product target requires attributed PR publication via stack merge-pr')
+        if ambiguous:
+            raise SyncwheelError('cannot prove push excludes opted-in product targets; use explicit work refs')
 
 
 def push_command(command):
@@ -540,6 +562,9 @@ class GitRecoveryStore:
     def _save(self, current, proposed):
         if proposed == current['state']:
             return current['state_sha']
+        destinations = push_destinations(self.root, self.remote)
+        if len(destinations) != 1:
+            raise SyncwheelError('recovery state CAS requires one canonical push destination')
         # No worktree, index, local branch or application ref is changed.
         blob = self.git('hash-object', '-w', '--stdin', input=json.dumps(proposed, sort_keys=True) + '\n')
         subtree = self.git('mktree', input='100644 blob ' + blob + '\tactor-recovery.json\n')
@@ -549,5 +574,5 @@ class GitRecoveryStore:
         # This lease protects a fast-forward child of the observed state. It
         # never rewrites ancestry; stale writers fail instead of forcing.
         self.git('push', '--porcelain', '--force-with-lease=' + self.state_ref + ':' + current['state_sha'],
-                 self.remote, commit + ':' + self.state_ref)
+                 destinations[0], commit + ':' + self.state_ref)
         return commit

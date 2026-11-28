@@ -498,6 +498,69 @@ class MergeEntryPointTest(unittest.TestCase):
         self.assertEqual(delivery_blockers(state, 'product'), ['late-proof'])
         self.assertEqual(state['pending_incidents'], {})
 
+    def test_review_r4_unmapped_target_real_merge_proceeds_without_actor_binding(self):
+        state = self.store.snapshot()['state']
+        state['policy']['product_refs'] = ['refs/heads/another-product']
+        self.provision(self.state_ref, state)
+        plan = self.preview(reference=None)
+        self.assertEqual(plan['status'], 'ready')
+        self.assertNotIn('actorRecovery', plan)
+        self.assertEqual(self.apply_merge(plan, None), 0)
+        self.assertEqual(self.store.snapshot()['state']['operations'], {})
+
+    def test_review_r4_newly_mapped_target_rejects_old_unscoped_preview(self):
+        state = self.store.snapshot()['state']
+        state['policy']['product_refs'] = ['refs/heads/another-product']
+        self.provision(self.state_ref, state)
+        plan = self.preview(reference=None)
+        state = self.store.snapshot()['state']
+        state['policy']['product_refs'] = ['refs/heads/main']
+        self.provision(self.state_ref, state)
+        with self.assertRaisesRegex(SyncwheelError, 'policy changed'):
+            recovery_module.reserve_merge(self.root, {}, plan, reference=None)
+        self.assertEqual(self.store.snapshot()['state']['operations'], {})
+
+    def fanout(self, first_name='unprotected', *, second=None):
+        first = self.fixture.tmp / (first_name + '.git')
+        subprocess.run(['git', 'init', '--bare', '-q', str(first)], check=True)
+        self.store.git('push', str(first), self.fixture.base + ':refs/heads/main')
+        alias = 'fanout-' + first_name
+        self.fixture.git('remote', 'add', alias, str(first))
+        self.fixture.git('config', '--add', 'remote.' + alias + '.pushurl', str(first))
+        self.fixture.git('config', '--add', 'remote.' + alias + '.pushurl', str(second or self.fixture.remote))
+        return alias, first
+
+    def test_review_r5_second_pushurl_protected_no_destination_changes(self):
+        alias, first = self.fanout()
+        before = [self.store.git('--git-dir=' + str(path), 'rev-parse', 'refs/heads/main')
+                  for path in (first, self.fixture.remote)]
+        refusal = None
+        try:
+            self.app.run(['git', 'push', alias, self.fixture.head + ':refs/heads/main'], cwd=self.root)
+        except SyncwheelError as exc:
+            refusal = str(exc)
+        after = [self.store.git('--git-dir=' + str(path), 'rev-parse', 'refs/heads/main')
+                 for path in (first, self.fixture.remote)]
+        self.assertEqual(before, after)
+        self.assertIsNotNone(refusal)
+        self.assertIn('product target', refusal)
+
+    def test_review_r5_unrelated_work_ref_fans_out_normally(self):
+        alias, first = self.fanout()
+        ref = 'refs/heads/ordinary-work'
+        self.app.run(['git', 'push', alias, self.fixture.head + ':' + ref], cwd=self.root)
+        for path in (first, self.fixture.remote):
+            self.assertEqual(self.store.git('--git-dir=' + str(path), 'rev-parse', ref), self.fixture.head)
+
+    def test_review_r5_legacy_unprotected_destinations_keep_normal_publication(self):
+        second = self.fixture.tmp / 'second-unprotected.git'
+        subprocess.run(['git', 'init', '--bare', '-q', str(second)], check=True)
+        self.store.git('push', str(second), self.fixture.base + ':refs/heads/main')
+        alias, first = self.fanout('legacy-first', second=second)
+        self.app.run(['git', 'push', alias, self.fixture.head + ':refs/heads/main'], cwd=self.root)
+        for path in (first, second):
+            self.assertEqual(self.store.git('--git-dir=' + str(path), 'rev-parse', 'refs/heads/main'), self.fixture.head)
+
 
 if __name__ == '__main__':
     unittest.main()
