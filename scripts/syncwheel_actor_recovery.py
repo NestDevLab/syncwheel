@@ -184,11 +184,10 @@ def from_profile(root, profile):
     for name in ('remote', 'state_ref', 'authority_ref', 'repository'):
         _text(configuration.get(name), name)
     targets = configuration.get('product_refs')
-    if not isinstance(targets, dict) or not targets or any(
+    if not isinstance(targets, list) or not targets or any(
             not isinstance(ref, str) or not ref.startswith('refs/heads/')
-            or not isinstance(delivery, str) or not delivery.strip()
-            for ref, delivery in targets.items()):
-        raise SyncwheelError('actor_recovery requires explicit product ref to delivery mapping')
+            for ref in targets):
+        raise SyncwheelError('actor_recovery requires explicit product refs')
     if configuration['state_ref'] in targets or configuration['authority_ref'] in targets:
         raise SyncwheelError('actor recovery state and authority refs cannot be product targets')
     return GitRecoveryStore(root, configuration['remote'], configuration['state_ref'],
@@ -199,8 +198,9 @@ def merge_binding(store, profile, plan, reference):
     """Attested responsible agent, never inferred from forge login/lane owner."""
     snapshot = store.snapshot()
     attestation = _record(snapshot['authority'], reference, 'publication', store.repository)
-    delivery = profile['actor_recovery']['product_refs'].get('refs/heads/' + plan['baseBranch'])
-    if (delivery is None or attestation.get('delivery') != delivery
+    target = 'refs/heads/' + plan['baseBranch']
+    _text(attestation.get('delivery'), 'affected work delivery identity')
+    if (target not in profile['actor_recovery']['product_refs'] or attestation.get('target_ref') != target
             or attestation.get('operation') != plan['operationId']
             or attestation.get('head') != plan['headSha']
             or attestation.get('pull_request') != plan['pullRequest']['number']

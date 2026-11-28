@@ -18,7 +18,7 @@ the candidate. For example:
     "remote": "origin",
     "state_ref": "refs/heads/delivery-recovery-state",
     "authority_ref": "refs/heads/delivery-recovery-authority",
-    "product_refs": {"refs/heads/main": "project-release"}
+    "product_refs": ["refs/heads/main"]
   }
 }
 ```
@@ -57,7 +57,7 @@ Every record includes `kind` and the exact `repository` identity.
 | --- | --- |
 | `incident` | Canonical distinct `incident`, stable `actor`, affected `delivery`, `proven: true`, `attributed: true`, and `evidence` reference to independently verified facts |
 | `recovery` | Existing `incident`, `recovered: true`, `attribution_verified: true`, and verified `evidence` |
-| `publication` | `operation`, stable `actor`, `delivery`, exact `head`, `pull_request`, `base_branch`, and exact `base_sha` |
+| `publication` | `operation`, stable `actor`, work-specific `delivery`, exact `target_ref`, exact `head`, `pull_request`, `base_branch`, and exact `base_sha` |
 | `review` | Same `operation`, `actor`, exact `head`, different `reviewer`, `outcome: "approved"`, and verified `evidence` |
 | `outcome` | Same `operation`, `actor`, `delivery`, exact `head`, `outcome: "published"` or `"not_published"`, and verified remote `evidence` |
 
@@ -66,6 +66,9 @@ The authority deduplicates the underlying incident, rather than assigning a new
 ID to each report. Replaying the same confirmed incident cannot increment the
 count. Local JSON imports and unverified booleans cannot create authority records.
 
+`delivery` identifies the affected work, not a lane or the product branch shared
+by unrelated work. The independent authority verifies this binding. Two different
+deliveries to the same configured product target retain independent holds.
 Only unrecovered incidents for the selected delivery block that delivery. One
 incident does not require repeat review. After the second distinct confirmed
 incident, the next actual publication of that actor requires independent review

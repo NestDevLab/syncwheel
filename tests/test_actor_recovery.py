@@ -250,7 +250,7 @@ class MergeEntryPointTest(unittest.TestCase):
         self.profile = {'hooks': {'mode': 'required'}, 'github_pr_merge': self.fixture.policy(),
                         'actor_recovery': {'enabled': True, 'remote': 'origin',
                             'state_ref': self.state_ref, 'authority_ref': self.authority_ref,
-                            'repository': self.repository, 'product_refs': {'refs/heads/main': 'product'}}}
+                            'repository': self.repository, 'product_refs': ['refs/heads/main']}}
         self.write_profile()
         self.fixture.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         self.fixture.manifest_path.write_text(json.dumps(self.fixture.manifest) + '\n')
@@ -283,9 +283,9 @@ class MergeEntryPointTest(unittest.TestCase):
             return self.app.build_github_pr_merge_plan(self.root, self.fixture.manifest,
                                                       self.fixture.manifest_path, 'feature', args)
 
-    def binding(self, actor='responsible-agent'):
+    def binding(self, actor='responsible-agent', delivery='product'):
         return self.attest('publication', 'publication', operation='merge-1', actor=actor,
-                           delivery='product', head=self.fixture.head, base_sha=self.fixture.base,
+                           delivery=delivery, target_ref='refs/heads/main', head=self.fixture.head, base_sha=self.fixture.base,
                            base_branch='main', pull_request=25)
 
     def incidents(self, actor='responsible-agent'):
@@ -319,6 +319,14 @@ class MergeEntryPointTest(unittest.TestCase):
         state = self.store.snapshot()['state']
         self.assertEqual(state['operations']['merge-1']['outcome']['outcome'], 'published')
         self.assertEqual(state['reviewed_through'], {})
+
+    def test_different_delivery_to_same_product_target_is_not_globally_held(self):
+        proof = self.attest('affected-work', 'incident', incident='affected-work',
+                            actor='responsible-agent', delivery='affected-work',
+                            proven=True, attributed=True, evidence='independent-proof')
+        self.store.apply(self.store.snapshot(), 'confirm', proof)
+        binding = self.binding(actor='legitimate-successor', delivery='unrelated-work')
+        self.assertEqual(self.apply_merge(self.preview(), binding), 0)
 
     def test_exact_review_required_then_consumed_only_on_remote_success(self):
         self.incidents()
