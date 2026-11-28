@@ -4,6 +4,7 @@ import copy
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -560,6 +561,71 @@ class MergeEntryPointTest(unittest.TestCase):
         self.app.run(['git', 'push', alias, self.fixture.head + ':refs/heads/main'], cwd=self.root)
         for path in (first, second):
             self.assertEqual(self.store.git('--git-dir=' + str(path), 'rev-parse', 'refs/heads/main'), self.fixture.head)
+
+    def test_review_r6_explicit_url_git_resolution_matches_native_transport(self):
+        for rewrite in ('insteadOf', 'pushInsteadOf'):
+            with self.subTest(rewrite=rewrite):
+                source = str(self.fixture.tmp / ('declared-alias-' + rewrite))
+                self.fixture.git('config', 'url.' + str(self.fixture.remote) + '.' + rewrite, source)
+                # Observe ordinary Git transport with a harmless work ref on a
+                # local fixture. No bypass payload, external endpoint or product write.
+                observed_ref = 'refs/heads/observed-' + rewrite.lower()
+                self.store.git('push', source, self.fixture.head + ':' + observed_ref)
+                self.assertEqual(self.store.git('--git-dir=' + str(self.fixture.remote),
+                                                'rev-parse', observed_ref), self.fixture.head)
+                if rewrite == 'pushInsteadOf':
+                    with self.assertRaisesRegex(SyncwheelError, 'requires a named remote'):
+                        recovery_module.push_destinations(self.root, source)
+                    alias = 'declared-rewrite-remote'
+                    self.fixture.git('remote', 'add', alias, source)
+                    self.assertEqual(recovery_module.push_destinations(self.root, alias), [str(self.fixture.remote)])
+                    publication_destination = alias
+                else:
+                    self.assertEqual(recovery_module.push_destinations(self.root, source), [str(self.fixture.remote)])
+                    publication_destination = source
+                before = self.store.git('--git-dir=' + str(self.fixture.remote), 'rev-parse', 'refs/heads/main')
+                with self.assertRaisesRegex(SyncwheelError, 'product target'):
+                    self.app.run(['git', 'push', publication_destination, self.fixture.head + ':refs/heads/main'], cwd=self.root)
+                self.assertEqual(self.store.git('--git-dir=' + str(self.fixture.remote),
+                                                'rev-parse', 'refs/heads/main'), before)
+                allowed = 'refs/heads/allowed-' + rewrite.lower()
+                self.app.run(['git', 'push', publication_destination, self.fixture.head + ':' + allowed], cwd=self.root)
+                self.assertEqual(self.store.git('--git-dir=' + str(self.fixture.remote),
+                                                'rev-parse', allowed), self.fixture.head)
+
+    def test_review_r6_inline_git_configuration_uses_same_resolution_as_push(self):
+        source = str(self.fixture.tmp / 'inline-route')
+        configuration = 'url.' + str(self.fixture.remote) + '.insteadOf=' + source
+        prefix = ['git', '-c', configuration, 'push', source]
+        ref = 'refs/heads/inline-work'
+        self.app.run([*prefix, self.fixture.head + ':' + ref], cwd=self.root)
+        self.assertEqual(self.store.git('--git-dir=' + str(self.fixture.remote), 'rev-parse', ref), self.fixture.head)
+        with self.assertRaisesRegex(SyncwheelError, 'product target'):
+            self.app.run([*prefix, self.fixture.head + ':refs/heads/main'], cwd=self.root)
+        self.assertEqual(self.store.git('--git-dir=' + str(self.fixture.remote),
+                                        'rev-parse', 'refs/heads/main'), self.fixture.base)
+
+    def test_review_r6_relative_caller_directory_and_git_C_preserve_endpoint(self):
+        peer = self.peer_store()
+        selected = os.path.relpath(peer.root, self.root)
+        destination = os.path.relpath(self.fixture.remote, peer.root)
+        prefix = ['git', '-C', selected, 'push', destination]
+        ref = 'refs/heads/relative-work'
+        self.app.run([*prefix, self.fixture.head + ':' + ref], cwd=self.root)
+        self.assertEqual(self.store.git('--git-dir=' + str(self.fixture.remote), 'rev-parse', ref), self.fixture.head)
+        with self.assertRaisesRegex(SyncwheelError, 'product target'):
+            self.app.run([*prefix, self.fixture.head + ':refs/heads/main'], cwd=self.root)
+
+    def test_review_r6_nonstable_rewrite_refuses_before_transport(self):
+        first = str(self.fixture.tmp / 'first-declared-route')
+        second = str(self.fixture.tmp / 'second-declared-route')
+        self.fixture.git('config', 'url.' + second + '.insteadOf', first)
+        self.fixture.git('config', 'url.' + str(self.fixture.remote) + '.insteadOf', second)
+        before = self.store.git('--git-dir=' + str(self.fixture.remote), 'rev-parse', 'refs/heads/main')
+        with self.assertRaisesRegex(SyncwheelError, 'not stable'):
+            self.app.run(['git', 'push', first, self.fixture.head + ':refs/heads/main'], cwd=self.root)
+        self.assertEqual(self.store.git('--git-dir=' + str(self.fixture.remote),
+                                        'rev-parse', 'refs/heads/main'), before)
 
 
 if __name__ == '__main__':

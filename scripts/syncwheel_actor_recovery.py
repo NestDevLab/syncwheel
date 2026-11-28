@@ -31,6 +31,8 @@ readback. This does not pretend that Git and forge share an atomic transaction.
 """
 
 import copy
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -40,6 +42,8 @@ from syncwheel_errors import SyncwheelError
 
 PATH = '.syncwheel/actor-recovery.json'
 STATE_REF = 'refs/heads/syncwheel/actor-recovery'
+_TRANSPORT_PREFIX = contextvars.ContextVar('actor_recovery_git_prefix', default=())
+_TRANSPORT_ENV = contextvars.ContextVar('actor_recovery_git_environment', default=None)
 
 
 def empty_state(repository):
@@ -279,10 +283,33 @@ def push_destinations(root, remote):
     try:
         destinations = reader.git('remote', 'get-url', '--push', '--all', remote).splitlines()
     except SyncwheelError:
-        destinations = [remote]  # An explicit URL/path, rather than a remote alias.
+        destinations = _explicit_push_destination(reader, remote)
     if not destinations or any(not value.strip() for value in destinations):
         raise SyncwheelError('publication push destination is unavailable')
+    # Metadata reads of a resolved URL must observe that same endpoint. A
+    # second rewrite would otherwise inspect a different repository than the
+    # original push. Refuse such configurations rather than guess or transport.
+    for destination in destinations:
+        if _explicit_push_destination(reader, destination) != [destination]:
+            raise SyncwheelError('push destination is not stable for canonical observation; use an explicit stable endpoint')
     return list(dict.fromkeys(destinations))
+
+
+def _explicit_push_destination(reader, value):
+    # --get-url does not contact the endpoint. It applies Git's insteadOf
+    # rules, but has no push mode. Never guess pushInsteadOf routing: require
+    # a named remote so get-url --push can prove that transport selection.
+    rules = reader.git('config', '--null', '--get-regexp', r'^url\..*\.pushinsteadof$',
+                       allow_missing=True)
+    for entry in rules.split('\0'):
+        if not entry:
+            continue
+        key, separator, prefix = entry.partition('\n')
+        if not separator:
+            raise SyncwheelError('cannot verify configured push URL rules')
+        if value.startswith(prefix):
+            raise SyncwheelError('explicit URL affected by pushInsteadOf requires a named remote before publication')
+    return reader.git('ls-remote', '--get-url', value).splitlines()
 
 
 def merge_binding(store, profile, plan, reference):
@@ -470,19 +497,41 @@ def guard_product_push(root, profile, command):
             raise SyncwheelError('cannot prove push excludes opted-in product targets; use explicit work refs')
 
 
-def push_command(command):
-    """Recognize native Git push with the common supported global options."""
+def _push_position(command):
     if not command or command[0] != 'git':
         return None
     index = 1
     while index < len(command) and command[index].startswith('-'):
-        if command[index] in ('-C', '-c', '--git-dir', '--work-tree'):
+        if command[index] in ('-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'):
             index += 2
-        elif command[index] == '--no-pager' or command[index].startswith(('--git-dir=', '--work-tree=')):
+        elif (command[index] in ('--no-pager', '--paginate', '-p', '--bare', '--no-replace-objects',
+                                 '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs',
+                                 '--icase-pathspecs', '--no-optional-locks', '--no-lazy-fetch', '--no-advice')
+              or command[index].startswith(('--git-dir=', '--work-tree=', '--namespace=', '--config-env='))):
             index += 1
         else:
+            if 'push' in command[index:]:
+                raise SyncwheelError('cannot verify Git push transport with these global options')
             return None
-    return ['git', *command[index:]] if command[index:index + 1] == ['push'] else None
+    return index if command[index:index + 1] == ['push'] else None
+
+
+def push_command(command):
+    """Recognize a native push without discarding its transport selectors."""
+    index = _push_position(command)
+    return ['git', *command[index:]] if index is not None else None
+
+
+@contextlib.contextmanager
+def transport_context(command, environment):
+    index = _push_position(command)
+    prefix_token = _TRANSPORT_PREFIX.set(tuple(command[1:index]) if index is not None else ())
+    env_token = _TRANSPORT_ENV.set(environment)
+    try:
+        yield
+    finally:
+        _TRANSPORT_PREFIX.reset(prefix_token)
+        _TRANSPORT_ENV.reset(env_token)
 
 
 class GitRecoveryStore:
@@ -505,13 +554,17 @@ class GitRecoveryStore:
         if not remote or remote.startswith('-'):
             raise SyncwheelError('repository-approved remote required')
 
-    def git(self, *args, input=None):
-        environment = os.environ.copy()
-        for name in ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
-                     'GIT_PREFIX', 'GIT_NAMESPACE'):
-            environment.pop(name, None)
-        process = subprocess.run(['git', '-C', str(self.root), *args], input=input,
+    def git(self, *args, input=None, allow_missing=False):
+        environment = _TRANSPORT_ENV.get()
+        if environment is None:
+            environment = os.environ.copy()
+            for name in ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
+                         'GIT_PREFIX', 'GIT_NAMESPACE'):
+                environment.pop(name, None)
+        process = subprocess.run(['git', '-C', str(self.root), *_TRANSPORT_PREFIX.get(), *args], input=input,
                                  text=True, capture_output=True, check=False, env=environment)
+        if process.returncode == 1 and allow_missing:
+            return ''
         if process.returncode:
             raise SyncwheelError('actor recovery Git operation refused: ' + process.stderr.strip())
         return process.stdout.strip()

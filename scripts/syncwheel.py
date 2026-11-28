@@ -678,9 +678,11 @@ def git_command_is_read_only(cmd):
 
 def run(cmd, cwd=None, check=True, input_text=None, env=None, authorize=True):
     push = _actor_recovery.push_command(cmd)
-    if push is not None and cwd is not None:
-        root = worktree_policy_root(git_command_cwd(cwd, cmd))
-        _actor_recovery.guard_product_push(root, load_repo_profile(root), push)
+    if push is not None:
+        # Resolve with the exact caller directory, global Git arguments and
+        # normalized environment that the transport will use, including -C/-c.
+        with _actor_recovery.transport_context(cmd, managed_process_env(env, authorize=False)):
+            _actor_recovery.guard_product_push(Path(cwd or os.getcwd()), {}, push)
     process_env = managed_process_env(
         env, authorize=authorize and not git_command_is_read_only(cmd)
     )

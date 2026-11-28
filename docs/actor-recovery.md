@@ -162,6 +162,18 @@ earlier destination can change. Explicit work refs that are ungoverned at every
 destination retain ordinary fanout behavior, as do repositories without opt-in.
 Recovery-state transactions themselves require one canonical destination.
 
+Explicit URL/path fallback is resolved by Git's network-free
+`ls-remote --get-url`, rather than trusted as literal text. Named remotes retain
+`remote get-url --push --all`. Resolution uses the caller's actual directory,
+global Git arguments and normalized environment, including `-C` and `-c`.
+These operations do not create or edit remote configuration.
+
+Git's explicit-URL query has no push mode. An explicit URL affected by
+`pushInsteadOf` therefore refuses before transport; use a declared named remote
+whose push endpoint Git can verify. A resolved endpoint that would be rewritten
+again during canonical observation also refuses. Ordinary stable explicit URLs,
+paths, `insteadOf` routes and verified named push remotes remain supported.
+
 Raw Git, another forge client, CI release jobs, external deployment and runtime
 installs are not intercepted. Server protection and their owners must enforce
 the same contract before claiming end-to-end protection there. A local CLI cannot
