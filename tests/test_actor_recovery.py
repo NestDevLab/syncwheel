@@ -12,6 +12,10 @@ import tempfile
 import unittest
 from unittest import mock
 
+SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
 from syncwheel_actor_recovery import (
     GitRecoveryStore, PATH, delivery_blockers, empty_state, run_command, transition,
 )

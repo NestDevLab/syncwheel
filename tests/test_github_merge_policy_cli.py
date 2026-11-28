@@ -71,7 +71,7 @@ class MergePolicyCliTest(unittest.TestCase):
                       'merge_method': 'squash', 'allowed_bypasses': [], 'merge_actors': ['reviewer'],
                       'pr_authors': ['author'], 'checks': 'all'}
             observation = {'schemaVersion': 1, 'repository': 'example/project', 'identity': {'login': 'reviewer'},
-                'repositoryInfo': {'permissions': {'admin': True},
+                'repositoryInfo': {'permissions': {'admin': True}, 'cloneUrl': str(remote),
                                    'allowMergeMethods': {'squash': True, 'merge': True, 'rebase': True}},
                 'pr': {'number': 1, 'url': 'https://github.com/example/project/pull/1', 'state': 'OPEN',
                        'isDraft': False, 'headRefName': 'pr/feature', 'headRefOid': head, 'baseRefName': 'main',
