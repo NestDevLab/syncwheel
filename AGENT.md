@@ -118,6 +118,9 @@ End with:
 
 - Install handoff: `install.md`
 - AI agents: `docs/ai-agents.md`
+- Lightweight delivery, acceptance evidence and delivery boundaries:
+  `docs/ai-agents.md#lightweight-delivery-and-acceptance`,
+  `docs/ai-agents.md#delivery-boundaries-and-violations`
 - Agent procedure: `docs/agent-procedure.md`
 - Manifest tracking: `docs/manifest-tracking.md`
 - Active-active protocol: `docs/design/active-active-coordination.md`

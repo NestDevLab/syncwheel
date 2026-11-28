@@ -16,6 +16,9 @@ Default operating stance:
 - integration is rebuilt as an ordered replay of declared stacks
 - channels are optional selected compositions whose exact stack revisions move
   only through explicit channel operations
+- author in a light governed lane by default; use a full lane only for a named
+  dependency, build, test or debugging need that the light lane and repository CI
+  cannot satisfy
 
 ## Why the manifest matters
 
@@ -145,6 +148,24 @@ branch, so both branch and integration containment checks converge.
 `validate` also reports non-merge commits that exist on integration after
 `integration.base` but are not declared in any stack. These commits need a
 manifest update or an explicit decision to keep them temporary.
+
+Keep replay order separate from test compatibility. Declare `depends_on` only
+when one stack requires another to replay first, and keep that graph acyclic.
+Resolve dependency cycles as manifest errors. Record compatibility combinations
+and their CI evidence separately; testing two stacks together does not by itself
+make one a replay dependency of the other.
+
+Use the target pull request and its required CI as the delivery surface. Prefer
+tests on the exact candidate revision and choose additional tests in proportion
+to the changed behavior. When existing CI can test a needed composition, use it
+instead of provisioning a local environment. Local installation or deployment
+must follow the repository's separate environment authorization and deployment
+procedure; a source PR or CI result alone does not authorize it.
+
+Record a sign-off with the expected scenario, approving person, date and exact
+revision. The reviewer compares the proposed delta with that sign-off. Renew it
+if the expected behavior or reviewed candidate changes, or if it is unclear
+whether the original sign-off still covers the change.
 
 ## What remains non-deterministic
 

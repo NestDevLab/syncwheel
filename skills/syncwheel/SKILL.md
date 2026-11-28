@@ -254,10 +254,12 @@ For authoring, open a governed lane instead of editing the primary checkout:
 syncwheel worktree open <lane> [--into <existing-stack>] [--full]
 ```
 
-The default light lane is for editing and committing only. It receives no
-dependency provisioning; use `--full` only for an explicitly necessary
-dependency, build, test, or debugging surface. This is not a security sandbox,
-so do not defeat the light-lane boundary with raw install/test commands. The
+Use the default light lane for ordinary editing and commits. Request `--full`
+only for a concrete dependency, build, test or debugging need that cannot be met
+by the light lane and repository CI, and record the reason before opening it.
+The light lane receives no dependency provisioning. Do not defeat that boundary
+with raw install or test commands. A lane is an operational boundary, not a
+security sandbox. The
 clone-local lane warns at four active entries by default, permitting another
 lane. `governed_worktree_capacity` can set another `limit`; only explicit
 `enforcement: "error"` enforces a hard cap. After its commits are
@@ -272,6 +274,39 @@ configured root; a dirty, unknown, or current-directory lane stays visible and
 requires explicit recovery. Check governed-worktree warnings before a mutating
 lifecycle command. No command removes another lane because its lease expired:
 mutating commands only finish a capture or release that was already started.
+
+Deliver through the target pull request and required CI. Prefer exact-revision
+CI and choose additional tests in proportion to the changed behavior. Use an
+existing CI composition for environment coverage when it is available; do not
+provision a local environment just to duplicate that check. Keep declared replay
+dependencies separate from compatibility tests: `depends_on` means one stack
+must replay first, and cycles are invalid. Record combinations tested for
+compatibility separately.
+
+Keep acceptance evidence with the task or PR: scenario, approving person, date
+and exact revision. The reviewer checks the candidate delta against that
+scenario. Renew acceptance if behavior changes, the candidate materially
+changes after approval, or applicability is uncertain. Tests provide evidence
+for behavior; they do not replace acceptance of the intended behavior.
+
+Declare every commit included in shared integration or publication in the
+manifest, with a real owner or approved historical classification. Follow the
+documented capture or reconciliation path for unregistered work. Use only
+project-authorized branches, builds, artifacts and folders for local environment
+changes or deployment; a source-change authorization does not cover deployment.
+Do not use another clone, checkout or output folder to evade review, CI or
+deployment policy. Syncwheel manages its declared refs and metadata; its CLI and
+local hooks do not enforce policy in arbitrary clones, local build tools or
+deployment systems. Use repository protections and the deployment system for
+those controls. A confirmed violation blocks only its responsible delivery
+until recovery and attribution are verified; finding or reporting an issue is
+not a violation. Require independent review of that delivery's next publication
+after a confirmed repeat violation. Do not block unrelated work or infer a
+violation from an unresolved warning.
+Lane justification, scenario sign-off, acceptance renewal and repeat-violation
+review are workflow requirements, not CLI-enforced approvals. `worktree open
+--full` does not decide whether the task needed a full lane or whether a person
+approved its behavior.
 
 To see the lanes, run `syncwheel worktree list --problems` (read-only). When more
 than three lanes need attention, other commands print one summary line that
