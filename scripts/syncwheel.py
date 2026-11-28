@@ -200,6 +200,7 @@ from syncwheel_ledger import manifest_channel_history_summary
 from syncwheel_adoption_transition import verify_adoption_transition
 
 import syncwheel_publication_intents as _publication_policy
+import syncwheel_actor_recovery as _actor_recovery
 from syncwheel_publication_intents import (
     PublicationIntents,
     COORDINATION_CLAIM_FILE,
@@ -678,6 +679,12 @@ def git_command_is_read_only(cmd):
 
 
 def run(cmd, cwd=None, check=True, input_text=None, env=None, authorize=True):
+    push = _actor_recovery.push_command(cmd)
+    if push is not None:
+        # Resolve with the exact caller directory, global Git arguments and
+        # normalized environment that the transport will use, including -C/-c.
+        with _actor_recovery.transport_context(cmd, managed_process_env(env, authorize=False)):
+            _actor_recovery.guard_product_push(Path(cwd or os.getcwd()), {}, push)
     process_env = managed_process_env(
         env, authorize=authorize and not git_command_is_read_only(cmd)
     )
@@ -6379,6 +6386,8 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             'headSha': pr.get('headRefOid'),
             'baseSha': pr.get('baseRefOid'),
         },
+        'recoveryRemote': ((observation or {}).get('repositoryInfo') or {}).get('cloneUrl')
+            or 'https://github.com/' + policy['repository'] + '.git',
         'headSha': pr.get('headRefOid'),
         'baseSha': target_base_sha,
         'author': pr.get('author'),
@@ -6415,6 +6424,16 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     plan['planDigest'] = github_pr_merge_plan_digest(plan)
     requested = normalize_channel_operation_id(getattr(args, 'operation_id', None))
     plan['operationId'] = requested or 'github-pr-merge-' + plan['planDigest'][:24]
+    recovery = _actor_recovery.preview_merge(
+        repo_root, load_repo_profile(worktree_policy_root(repo_root)), plan,
+        reference=getattr(args, 'actor_publication', None), review=getattr(args, 'actor_review', None))
+    if recovery is not None:
+        plan['actorRecovery'] = recovery
+        if recovery['status'] != 'ready':
+            plan['blockers'].append({'code': 'attributed_delivery_recovery', 'detail': recovery['detail']})
+            plan['status'] = 'blocked'
+            plan['next'] = 'resolve attributed delivery recovery and preview again'
+        plan['planDigest'] = github_pr_merge_plan_digest(plan)
     return plan
 
 
@@ -6531,6 +6550,19 @@ def command_stack_merge_pr(args):
             repo_root, manifest_path, args.operation_id, args.plan_digest,
         )
         if existing:
+            profile = load_repo_profile(worktree_policy_root(repo_root))
+            prepared = next((event['payload']['plan'] for event in reversed(
+                    github_pr_merge_events(repo_root, manifest_path, args.operation_id))
+                    if event['type'] == 'github_pr_merge_prepared'), None)
+            if prepared is not None and prepared.get('actorRecovery') is not None:
+                if prepared is None:
+                    raise SyncwheelError('actor recovery requires original prepared PR evidence')
+                observed = github_adapter_request(repo_root, {
+                    **prepared['adapterRequest'], 'pullRequestNumber': prepared['pullRequest']['number'],
+                })
+                _actor_recovery.reconcile_merge(
+                    repo_root, profile, prepared, reference=getattr(args, 'actor_publication', None),
+                    observation=observed)
             print(json.dumps(existing, indent=2, sort_keys=True))
             return 0 if existing.get('status', '').startswith('succeeded') else 2
     plan = build_github_pr_merge_plan(repo_root, manifest, manifest_path, args.stack, args)
@@ -6562,8 +6594,12 @@ def command_stack_merge_pr(args):
         if (current_acceptance != plan.get('acceptanceEvidence')
                 or current_acceptance_authority != plan.get('acceptanceAuthority')):
             raise SyncwheelError('scenario acceptance changed before merge; preview again')
+        _actor_recovery.reserve_merge(
+            repo_root, load_repo_profile(worktree_policy_root(repo_root)), plan,
+            reference=getattr(args, 'actor_publication', None), review=getattr(args, 'actor_review', None))
         record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_started', plan, status='started')
         record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_prepared', plan, status='prepared')
+        _actor_recovery.start_merge(repo_root, plan, getattr(args, 'actor_publication', None))
         merge_result = github_adapter_request(repo_root, {
             'operation': 'merge',
             'repository': plan['repository'],
@@ -6577,12 +6613,37 @@ def command_stack_merge_pr(args):
         'pullRequestNumber': plan['pullRequest']['number'],
     })
     status = github_pr_merge_classify(plan, observed, bool(merge_result.get('ok')))
+    _actor_recovery.reconcile_merge(
+        repo_root, load_repo_profile(worktree_policy_root(repo_root)), plan,
+        reference=getattr(args, 'actor_publication', None), observation=observed)
     receipt = github_pr_merge_receipt(
         repo_root, manifest_path, plan, status, observed, merge_result,
         detail=(merge_result.get('stderr') or merge_result.get('stdout')) if status in {'failed', 'unknown'} else None,
     )
     print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0 if status.startswith('succeeded') else 2
+
+
+def command_actor_recovery(args):
+    root = worktree_policy_root(resolve_repo_root(args.repo))
+    profile = _actor_recovery.repository_profile(root, getattr(args, 'remote', 'origin'))
+    store = _actor_recovery.from_profile(root, profile)
+    if store is None:
+        raise SyncwheelError('actor recovery is not enabled by repository owner configuration')
+    if args.recovery_action == 'reconcile':
+        if not args.apply:
+            result = {'applied': False, 'next': 'apply to read the exact PR outcome and reconcile without a merge retry'}
+        else:
+            result = _actor_recovery.reconcile_reference(
+                root, profile, args.reference, lambda request: github_adapter_request(root, request))
+            result['applied'] = result['status'] != 'unknown'
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get('status') != 'unknown' else 2
+    result = _actor_recovery.run_command(
+        store, args.recovery_action, getattr(args, 'reference', None),
+        apply=getattr(args, 'apply', False))
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
 
 
 def governed_worktree_registry_path(repo_root):
@@ -21491,10 +21552,10 @@ def main():
     try:
         if args.func == command_repo_acceptance:
             return command_repo_acceptance(args)
-        if args.func == command_worktree_policy:
+        if args.func in {command_worktree_policy, command_actor_recovery}:
             # Private preferences own no refs or lanes and must be configurable
             # outside a repository, or while an existing lane needs recovery.
-            return command_worktree_policy(args)
+            return args.func(args)
         if args.func in {command_stack_sync, command_stack_absorb}:
             adopted_metadata = True
             observation = _READONLY_DIAGNOSTICS.set(True)
@@ -21716,6 +21777,7 @@ def command_handlers():
         'command_replay_mode': command_replay_mode,
         'command_worktree_policy': command_worktree_policy,
         'command_repo_acceptance': command_repo_acceptance,
+        'command_actor_recovery': command_actor_recovery,
         'command_repo_add': command_repo_add,
         'command_repo_authority_set': command_repo_authority_set,
         'command_repo_authority_status': command_repo_authority_status,

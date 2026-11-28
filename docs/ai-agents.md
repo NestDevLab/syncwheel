@@ -127,8 +127,12 @@ independently found responsible. Record the evidence, affected delivery,
 recovery and attribution; do not infer a violation from a warning or an
 unresolved diagnostic alone.
 
-Lane justification, scenario sign-off, acceptance renewal and repeat-violation
-review are workflow requirements, not CLI-enforced approvals. The CLI exposes
+Lane justification remains a workflow requirement. Repositories may explicitly
+enable the [scenario acceptance gate](scenario-acceptance.md) and the
+[native attributed PR recovery gate](actor-recovery.md). Their respective
+source authority, configured scope and residual surfaces remain separate;
+enabling one cannot satisfy or disable the other. Outside these opt-in contracts,
+scenario acceptance and repeat review remain workflow requirements. The CLI exposes
 `worktree open --full` and records lane metadata; it does not determine whether
 the task needed a full lane or whether a person approved its behavior. Use the
 repository's PR, CI and deployment controls for those decisions.

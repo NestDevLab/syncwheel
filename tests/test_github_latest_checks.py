@@ -56,7 +56,7 @@ class GithubLatestChecksTest(unittest.TestCase):
         }
 
     def plan(self, records, *, required=False, checks='all', pages=None, graphql_head=None,
-             graphql_truncated=False, legacy=(), graph_pages=None):
+             graphql_truncated=False, legacy=(), graph_pages=None, transport=None):
         policy = self.fixture.policy()
         policy.update(repository=self.repository, head_repositories=[self.repository], checks=checks,
                       merge_actors=[self.actor], pr_authors=[self.actor], commit_authors=[self.actor])
@@ -98,6 +98,7 @@ class GithubLatestChecksTest(unittest.TestCase):
         def run_json(argv, cwd):
             if argv == ['api', f'repos/{self.repository}']:
                 value = {'id': 1000, 'full_name': self.repository, 'permissions': {'admin': True},
+                         'clone_url': str(transport if transport is not None else self.fixture.remote),
                          'allow_squash_merge': True}
             elif argv == ['api', 'user']:
                 value = {'login': self.actor}
@@ -160,6 +161,21 @@ class GithubLatestChecksTest(unittest.TestCase):
                 self.fixture.repo, self.fixture.manifest, self.fixture.manifest_path, 'feature',
                 self.fixture.args(),
             )
+
+    def test_absent_policy_is_proved_on_the_real_public_fixture_transport(self):
+        self.assertEqual(self.fixture.git('ls-remote', '--refs', 'origin',
+                                         'refs/heads/syncwheel/actor-recovery'), '')
+        plan = self.plan([self.check(101)], required=True)
+        self.assertEqual(plan['recoveryRemote'], str(self.fixture.remote))
+        self.assertEqual(plan['status'], 'ready', plan['blockers'])
+        self.assertNotIn('actorRecovery', plan)
+
+    def test_unavailable_policy_discovery_is_not_treated_as_absent(self):
+        before = self.fixture.git('ls-remote', '--refs', 'origin')
+        unavailable = self.fixture.tmp / 'unavailable-public-mirror.git'
+        with self.assertRaisesRegex(self.syncwheel.SyncwheelError, 'Git operation refused'):
+            self.plan([self.check(101)], required=True, transport=unavailable)
+        self.assertEqual(self.fixture.git('ls-remote', '--refs', 'origin'), before)
 
     def test_new_success_supersedes_old_cancelled_regardless_of_input_order(self):
         old = self.check(101, 'CANCELLED')

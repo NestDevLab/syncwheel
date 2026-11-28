@@ -764,6 +764,7 @@ def observe(request, cwd):
         "acceptanceAuthorityError": acceptance_error,
         "repositoryInfo": {
             "id": repo_info.get("id"),
+            "cloneUrl": repo_info.get("clone_url"),
             "permissions": repo_info.get("permissions") or {},
             "allowMergeMethods": allow,
             "defaultBranch": repo_info.get("default_branch"),

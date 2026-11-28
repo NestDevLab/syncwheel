@@ -270,6 +270,15 @@ def build_parser(commands, version):
 
     add_worktree_policy_parser(repo_sub, commands, scope='repo', common=common)
     add_worktree_policy_parser(repo_sub, commands, scope='repo', common=common, name='execution-policy', execution=True)
+    recovery = repo_sub.add_parser('actor-recovery', help='opted-in, independently attested delivery recovery')
+    recovery_actions = recovery.add_subparsers(dest='recovery_action', required=True)
+    for action in ('status', 'confirm', 'recover', 'complete', 'reconcile'):
+        recovery_action = recovery_actions.add_parser(action, parents=[common])
+        recovery_action.add_argument('--remote', default='origin', help='repository publication remote')
+        if action != 'status':
+            recovery_action.add_argument('--reference', required=True, help='record ID on independent authority ref')
+            recovery_action.add_argument('--apply', action='store_true')
+        recovery_action.set_defaults(func=commands['command_actor_recovery'])
 
     add_acceptance_parser(repo_sub, commands, common)
 
@@ -1126,6 +1135,8 @@ def build_parser(commands, version):
     stack_merge_pr_p.add_argument('stack')
     stack_merge_pr_p.add_argument('--operation-id')
     stack_merge_pr_p.add_argument('--plan-digest')
+    stack_merge_pr_p.add_argument('--actor-publication', help='independent exact-PR publication attestation ID')
+    stack_merge_pr_p.add_argument('--actor-review', help='independent exact-candidate review attestation ID')
     stack_merge_pr_p.add_argument('-a', '--apply', action='store_true')
     stack_merge_pr_p.add_argument('-j', '--json', action='store_true')
     stack_merge_pr_p.set_defaults(func=commands['command_stack_merge_pr'])
@@ -1291,6 +1302,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
     # The revision-provider command deliberately owns its narrower transaction
     # inside the backend, after request and lease validation have completed.
     register((commands['command_revision_provider'],), mutates='always', manifest_mutates='internal')
+    register((commands['command_actor_recovery'],), mutates='apply', manifest_mutates='never')
     register((commands['command_revision_provider_resolve_prepared'],), mutates='apply', manifest_mutates='internal')
     register((
         commands['command_repo_add'],

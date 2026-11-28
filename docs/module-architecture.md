@@ -16,6 +16,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | `syncwheel_coordination_state` | Immutable remote state, control-manifest integrity and exclusive ownership evidence | Git observations, manifest inputs and state witnesses |
 | `syncwheel_publication_intents` | Intent identity, durable token lifecycle and bounded landing proofs | Git, ledger, state reader and transaction/evidence ports |
 | `syncwheel_publication` | Atomic publication, source leases, snapshots and reconciliation | Composed state, intent and replay services; Git/storage/projection/ledger ports |
+| `syncwheel_actor_recovery` | Opted-in delivery holds, exact-candidate repeat review and verified PR outcome reconciliation | Independent authority ref; shared Git CAS state; existing forge observation owner |
 | `syncwheel_journal` | File admission, status decoding, safe content observation | Shared errors; explicit status and reader inputs |
 | `syncwheel_journal_workflow` | Snapshot, publish, pull and recovery sequencing | Journal policy; explicit repository I/O port |
 | `syncwheel_ledger` | Event reduction into lifecycle state | Standard library |

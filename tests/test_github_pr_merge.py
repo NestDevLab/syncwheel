@@ -135,6 +135,7 @@ class GithubPrMergeTest(unittest.TestCase):
             'acceptanceAuthority': self.acceptance_authority(),
             'repositoryInfo': {
                 'id': 1000,
+                'cloneUrl': str(self.remote),
                 'permissions': {'admin': True},
                 'allowMergeMethods': {'squash': True, 'merge': True, 'rebase': True},
             },
