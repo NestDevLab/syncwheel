@@ -4,6 +4,10 @@
 
 - Add scenario acceptance provenance, live trusted-source verification and candidate-bound agent delta assessments. Recover shared decisions from exact forge review IDs, retain unverified provenance when human identity is not distinguishable, and require renewed acceptance for changed or uncertain behavior. Bind verification to the canonical repository and live candidate, consume opt-in canonical scenarios in merge planning/apply, and recheck revocation before merge. Preserve private configuration CAS and keep trust policy separate from candidate data.
 
+## 0.53.4 - 2026-11-28
+
+- Evaluate independent PR delivery against its real required CI when integration validation is advisory, without requiring or creating a local integration projection. Retain membership, source identity, dependency, authority and forge-check gates.
+
 ## 0.53.2 - 2026-11-27
 
 - Confine stack Git and recipe-add worktree recovery to the selected target, including pending intents, terminal registry records and path repairs. Keep unrelated lanes and lock evidence for explicit maintenance.
