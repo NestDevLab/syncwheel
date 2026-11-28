@@ -72,12 +72,11 @@ Do not treat an optional composition or a local test as a substitute for
 required CI.
 
 Record acceptance as a concrete scenario, the person who approved it, the date,
-and the exact revision or revisions covered. The reviewer checks the candidate
-delta against that scenario and the recorded revisions. Renew acceptance when
-the expected behavior changes, the candidate materially changes after approval,
-or the reviewer cannot determine whether the scenario still applies. A passing
-test is evidence for its behavior, not a replacement for acceptance of the
-intended behavior.
+and the exact revision or revisions covered. The agent assesses the candidate
+delta since those revisions against the accepted scenario. Renew acceptance
+only when the expected behavior changes or the delta's impact on that behavior
+is uncertain. A passing test is evidence for its behavior, not a replacement
+for acceptance of the intended behavior.
 
 Keep replay dependencies and compatibility evidence separate. Use declared
 stack dependencies only when one change requires another to be replayed first;
@@ -116,13 +115,15 @@ Syncwheel can validate and manage the refs and metadata described by its
 manifest. Its local CLI and hooks do not secure arbitrary clones, local build
 tools, environment credentials or deployment systems; repository CI, forge
 protections and the deployment system must enforce those boundaries. Treat a
-confirmed violation as a blocker for the responsible delivery only, until its
-work is recovered and attribution is verified. Discovery or reporting of an
-issue is not itself a violation. Do not impose a global block on unrelated
-work. After a confirmed repeat violation, require independent review of the
-next publication from the responsible delivery path. Record the evidence,
-affected delivery, recovery and attribution; do not infer a violation from a
-warning or an unresolved diagnostic alone.
+confirmed violation as a blocker only for the affected delivery, until its work
+is recovered and attribution is verified. Discovery or reporting of an issue is
+not itself a violation. Do not impose a global block on unrelated work. When a
+repeat violation is confirmed and attributed to an agent, require independent
+review of that agent's next publication, regardless of lane. A successor who
+takes over a lane does not inherit this requirement unless that successor is
+independently found responsible. Record the evidence, affected delivery,
+recovery and attribution; do not infer a violation from a warning or an
+unresolved diagnostic alone.
 
 Lane justification, scenario sign-off, acceptance renewal and repeat-violation
 review are workflow requirements, not CLI-enforced approvals. The CLI exposes

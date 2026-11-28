@@ -52,6 +52,13 @@ dedicated maintenance PR, excluded from `integration.stacks`. Preserve owner,
 reason, change and review evidence through the applicable path rather than
 turning these administrative changes into product stacks.
 
+For behavior sign-off, assess the delta since the approved revision against the
+accepted scenario; renew sign-off only if expected behavior changes or impact
+is uncertain. A confirmed repeat violation requires independent review of the
+attributed agent's next publication across lanes; a lane successor does not
+inherit that requirement unless independently found responsible. Hold only the
+affected delivery pending verified recovery and attribution.
+
 When Agentwheel delegates Git revisioning to `syncwheel revision-provider`, it
 must persist its start receipt, call `check` on a clean integration checkout,
 perform the file mutation, then call `preflight` with exact before/after hashes

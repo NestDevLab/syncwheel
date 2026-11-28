@@ -171,9 +171,9 @@ must follow the repository's separate environment authorization and deployment
 procedure; a source PR or CI result alone does not authorize it.
 
 Record a sign-off with the expected scenario, approving person, date and exact
-revision. The reviewer compares the proposed delta with that sign-off. Renew it
-if the expected behavior or reviewed candidate changes, or if it is unclear
-whether the original sign-off still covers the change.
+revision or revisions covered. The agent assesses the candidate delta since
+those revisions against the accepted scenario. Renew the sign-off only if the
+expected behavior changes or the delta's impact on that behavior is uncertain.
 
 ## What remains non-deterministic
 

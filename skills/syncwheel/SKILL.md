@@ -284,10 +284,11 @@ must replay first, and cycles are invalid. Record combinations tested for
 compatibility separately.
 
 Keep acceptance evidence with the task or PR: scenario, approving person, date
-and exact revision. The reviewer checks the candidate delta against that
-scenario. Renew acceptance if behavior changes, the candidate materially
-changes after approval, or applicability is uncertain. Tests provide evidence
-for behavior; they do not replace acceptance of the intended behavior.
+and exact revision or revisions covered. The agent assesses the candidate delta
+since those revisions against the accepted scenario. Renew acceptance only if
+the expected behavior changes or the delta's impact on that behavior is
+uncertain. Tests provide evidence for behavior; they do not replace acceptance
+of the intended behavior.
 
 In stack-managed repositories, declare every product commit included in shared
 integration or published as a managed stack in the manifest, with its real owner
@@ -305,10 +306,12 @@ Do not use another clone, checkout or output folder to evade review, CI or
 deployment policy. Syncwheel manages its declared refs and metadata; its CLI and
 local hooks do not enforce policy in arbitrary clones, local build tools or
 deployment systems. Use repository protections and the deployment system for
-those controls. A confirmed violation blocks only its responsible delivery
-until recovery and attribution are verified; finding or reporting an issue is
-not a violation. Require independent review of that delivery's next publication
-after a confirmed repeat violation. Do not block unrelated work or infer a
+those controls. A confirmed violation blocks only the affected delivery until
+its work is recovered and attribution is verified; finding or reporting an
+issue is not a violation. When a repeat violation is confirmed and attributed
+to an agent, require independent review of that agent's next publication across
+all lanes. A successor who takes over a lane does not inherit this requirement
+unless independently found responsible. Do not block unrelated work or infer a
 violation from an unresolved warning.
 Lane justification, scenario sign-off, acceptance renewal and repeat-violation
 review are workflow requirements, not CLI-enforced approvals. `worktree open
