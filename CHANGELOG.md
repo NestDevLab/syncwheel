@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.53.7 - 2026-11-28
+
+- Confine advisory absent-projection delivery to the authorized primary target with genuinely absent integration refs. Bind its authority to the exact forge-observed published target, reject local authority elevation and surface blocked layout anomalies in top-level warnings.
+
 ## 0.53.4 - 2026-11-28
 
 - Evaluate independent PR delivery against its real required CI when integration validation is advisory, without requiring or creating a local integration projection. Retain membership, source identity, dependency, authority and forge-check gates.

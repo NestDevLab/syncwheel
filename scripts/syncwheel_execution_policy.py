@@ -259,7 +259,7 @@ def check_matches_candidate(check, head):
     return isinstance(check, dict) and check.get('headSha') == head
 
 
-def primary_projection_findings(primary, integration_validation='required'):
+def primary_projection_findings(primary, integration_validation='required', *, authorized_target=False):
     """A PR's optional staging layout is observable, never synthetic Git state."""
     if primary['compliant']:
         return [], []
@@ -267,7 +267,8 @@ def primary_projection_findings(primary, integration_validation='required'):
         f"primary worktree branch mismatch at {primary['path']}: "
         f"expected one of {primary['expected_branches']!r}, found {primary['branch']!r}"
     )
-    return ([], [detail]) if integration_validation == 'advisory' else ([detail], [])
+    advisory = integration_validation == 'advisory'
+    return ([] if advisory and authorized_target else [detail], [detail] if advisory else [])
 
 
 def integration_findings(manifest, stack, integration_validation, *, branch_available, missing):
@@ -297,3 +298,28 @@ def integration_findings(manifest, stack, integration_validation, *, branch_avai
                            'or declare integration validation advisory in the clone-local merge policy'}
                 for commit in missing], []
     return [], []
+
+
+def absent_projection_authorization(primary, selected, canonical, authority, canonical_authority, *,
+                                    base_branch, target_remote, target_sha, fetched_sha, forge_base_sha,
+                                    local_projection, tracking_projection, remote_projection):
+    """Require immutable, forge-bound target policy; candidates cannot self-authorize."""
+    reasons = []
+    defaults = canonical['defaults']
+    if primary['branch'] != base_branch or base_branch != defaults['base_branch']:
+        reasons.append('primary is not the canonical delivery target')
+    if target_remote != defaults['publication_remote']:
+        reasons.append('delivery remote differs from canonical policy')
+    if selected['integration']['branch'] != canonical['integration']['branch']:
+        reasons.append('selected integration differs from canonical policy')
+    if target_sha != fetched_sha or target_sha != forge_base_sha:
+        reasons.append('delivery target is not bound to the current forge base')
+    if any((local_projection, tracking_projection, remote_projection)):
+        reasons.append('canonical integration ref exists')
+    if canonical_authority['mode'] != 'ai-managed' or 'source_change' not in canonical_authority['allow']:
+        reasons.append('published target does not authorize source changes')
+    if (set(authority['allow']) - set(canonical_authority['allow'])
+            or not set(canonical_authority['deny']).issubset(authority['deny'])):
+        reasons.append('working authority exceeds published target policy')
+    return {'authorized': not reasons, 'reasons': reasons, 'authority': canonical_authority,
+            'target': base_branch, 'integration': canonical['integration']['branch']}

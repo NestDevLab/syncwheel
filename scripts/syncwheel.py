@@ -6011,19 +6011,6 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     stack = require_stack(manifest, stack_id)
     blockers = []
     warnings = []
-    validation = validate_manifest(
-        repo_root, manifest, manifest_path,
-        integration_validation=policy.get('integration', 'required'),
-    )
-    for error in validation.get('errors', []):
-        github_blocker(blockers, 'manifest_invalid', error)
-    primary = validation.get('details', {}).get('primary_checkout')
-    if primary:
-        _, primary_warnings = _execution_policy.primary_projection_findings(
-            primary, policy.get('integration', 'required'),
-        )
-        warnings.extend({'code': 'primary_projection_not_validated', 'detail': detail,
-                         'evidence': primary} for detail in primary_warnings)
     source_revision, declared = github_stack_git_preflight(
         repo_root, manifest, stack, blockers, warnings,
         integration_validation=policy.get('integration', 'required'),
@@ -6241,6 +6228,60 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
                 github_blocker(blockers, 'base_changed', 'PR base is not an ancestor of the live delivery base', pr=historical_base_sha, observed=target_base_sha)
             if source_revision and not branch_contains(repo_root, source_revision, target_base_sha):
                 github_blocker(blockers, 'base_not_in_head', 'PR head does not contain the live delivery base', head=source_revision, observed=target_base_sha)
+    # Immutable target policy alone authorizes an absent projection layout.
+    primary = primary_checkout_state(repo_root, manifest)
+    projection_evidence = {'authorized': False, 'sourceVerified': False}
+    if policy.get('integration') == 'advisory' and target_base_sha:
+        try:
+            canonical = manifest_from_tree(repo_root, target_base_sha, integration_manifest_path(repo_root))
+            if canonical is not None:
+                canonical = normalize_manifest_data(canonical, integration_manifest_path(repo_root))
+                canonical_branch = canonical['integration']['branch']
+                primary = {**primary, 'expected_branch': canonical_branch,
+                           'expected_branches': [canonical_branch],
+                           'compliant': primary['branch'] == canonical_branch}
+                integration_remote = canonical['defaults']['canonical_remote']
+                remote_projection = remote_ref_tips(
+                    repo_root, integration_remote, [f'refs/heads/{canonical_branch}'],
+                ).get(f'refs/heads/{canonical_branch}')
+                projection_evidence = _execution_policy.absent_projection_authorization(
+                    primary, manifest, canonical, authority, manifest_authority(canonical),
+                    base_branch=base_branch, target_remote=stack.get('target_remote') or manifest['defaults']['publication_remote'],
+                    target_sha=target_base_sha, fetched_sha=fetched_base_sha if pr else None,
+                    forge_base_sha=(pr or {}).get('baseRefOid'),
+                    local_projection=ref_tip(repo_root, f'refs/heads/{canonical_branch}'),
+                    tracking_projection=ref_tip(repo_root, f'refs/remotes/{integration_remote}/{canonical_branch}'),
+                    remote_projection=remote_projection,
+                )
+                projection_evidence.update(
+                    commit=target_base_sha, path='.syncwheel/manifest.json',
+                    sourceVerified=(target_base_sha == fetched_base_sha == (pr or {}).get('baseRefOid')),
+                    fetchedSha=fetched_base_sha, forgeBaseSha=(pr or {}).get('baseRefOid'),
+                )
+        except (SyncwheelError, KeyError, TypeError, ValueError) as exc:
+            projection_evidence = {'authorized': False, 'sourceVerified': False, 'reason': str(exc)}
+    if policy.get('integration') == 'advisory' and not primary['compliant'] and not projection_evidence['sourceVerified']:
+        detail = 'advisory primary layout requires a verified published target control manifest'
+        github_blocker(blockers, 'primary_projection_authority_unverified', detail, evidence=projection_evidence)
+        warnings.append({'code': 'primary_projection_authority_unverified', 'detail': detail,
+                         'evidence': projection_evidence})
+    validation = validate_manifest(
+        repo_root, manifest, manifest_path,
+        integration_validation=policy.get('integration', 'required'),
+        primary_projection=primary,
+        authorized_absent_projection=projection_evidence['authorized'],
+    )
+    for error in validation.get('errors', []):
+        github_blocker(blockers, 'manifest_invalid', error)
+    primary_errors, primary_warnings = _execution_policy.primary_projection_findings(
+        primary, policy.get('integration', 'required'),
+        authorized_target=projection_evidence['authorized'],
+    )
+    for detail in primary_errors if policy.get('integration') == 'advisory' else []:
+        github_blocker(blockers, 'primary_projection_invalid', detail, evidence=projection_evidence)
+    warnings.extend({'code': 'primary_projection_not_validated', 'detail': detail,
+                     'evidence': {**primary, 'authorization': projection_evidence}}
+                    for detail in primary_warnings)
     if not isinstance(pr, dict):
         pr = {}
     number = pr.get('number') or (int(pr_number) if pr_number is not None else None)
@@ -6290,6 +6331,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'releaseEvidence': _execution_policy.release_status(execution_report, load_repo_profile(worktree_policy_root(repo_root)), source_revision),
         'authority': authority,
         'authorityProvenance': authority_provenance,
+        'primaryProjectionEvidence': projection_evidence,
         'source': {'branch': stack.get('branch'), 'revision': source_revision, 'base': stack.get('base'), 'commits': declared},
         'integration': {'branch': (manifest.get('integration') or {}).get('branch'), 'revision': ref_tip(repo_root, (manifest.get('integration') or {}).get('branch'))},
         'warnings': warnings,
@@ -10338,7 +10380,8 @@ def collect_repo_snapshot(repo_root, manifest):
 
 
 def validate_manifest(repo_root, manifest, manifest_path=None, *, defer_stack_histories=(),
-                      integration_validation='required'):
+                      integration_validation='required', primary_projection=None,
+                      authorized_absent_projection=False):
     warnings = []
     errors = []
     deferred = frozenset(defer_stack_histories)
@@ -10407,10 +10450,10 @@ def validate_manifest(repo_root, manifest, manifest_path=None, *, defer_stack_hi
     stacks_by_id = stack_map(manifest)
     integration = manifest['integration']
     integration_branch = integration['branch']
-    primary_checkout = primary_checkout_state(repo_root, manifest)
+    primary_checkout = primary_projection if primary_projection is not None else primary_checkout_state(repo_root, manifest)
     details['primary_checkout'] = primary_checkout
     primary_errors, primary_warnings = _execution_policy.primary_projection_findings(
-        primary_checkout, integration_validation,
+        primary_checkout, integration_validation, authorized_target=authorized_absent_projection,
     )
     errors.extend(primary_errors)
     warnings.extend(primary_warnings)
