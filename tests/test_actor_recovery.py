@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -626,6 +627,57 @@ class MergeEntryPointTest(unittest.TestCase):
             self.app.run(['git', 'push', first, self.fixture.head + ':refs/heads/main'], cwd=self.root)
         self.assertEqual(self.store.git('--git-dir=' + str(self.fixture.remote),
                                         'rev-parse', 'refs/heads/main'), before)
+
+    def test_main_integration_cli_keeps_independent_ci_and_actor_gates_together(self):
+        self.fixture.git('switch', '-q', 'main')
+        self.fixture.git('branch', '-D', 'main-integration')
+        self.fixture.manifest['defaults']['integration_membership'] = 'required'
+        self.fixture.manifest_path.write_text(json.dumps(self.fixture.manifest) + '\n')
+        self.profile['github_pr_merge'].update(integration='advisory', allowed_bypasses=[])
+        self.write_profile()
+        self.incidents()
+        self.binding()
+        observation = self.fixture.observation(decision='APPROVED', checks=[{
+            'name': 'required-ci', 'status': 'COMPLETED', 'conclusion': 'SUCCESS',
+            'headSha': self.fixture.head,
+        }])
+        observation['pr']['mergeStateStatus'] = 'CLEAN'
+        observation['rules']['branchProtection'] = {'required_status_checks': {'contexts': ['required-ci']}}
+        before = self.fixture.git('for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads')
+
+        def cli_plan(review=None):
+            arguments = [str(self.app.__file__), 'stack', 'merge-pr', 'feature',
+                         '--repo', str(self.root), '--operation-id', 'merge-1',
+                         '--actor-publication', 'publication', '--json']
+            if review is not None:
+                arguments.extend(['--actor-review', review])
+            output, errors = io.StringIO(), io.StringIO()
+            with mock.patch.object(sys, 'argv', arguments), \
+                 mock.patch.dict(os.environ, {'SYNCWHEEL_UPDATE_MODE': 'off',
+                    'SYNCWHEEL_REPO_REGISTRY': str(self.fixture.tmp / 'registry.json'),
+                    'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(self.fixture.tmp / 'settings.json')}), \
+                 mock.patch.object(self.app, 'github_adapter_request', return_value=observation), \
+                 mock.patch.object(self.app, 'managed_hook_syncwheel_command',
+                                   return_value=[sys.executable, str(self.app.__file__)]), \
+                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                result = self.app.main()
+            self.assertEqual(result, 0, errors.getvalue())
+            return json.loads(output.getvalue())
+
+        blocked = cli_plan()
+        self.assertIn('attributed_delivery_recovery', {item['code'] for item in blocked['blockers']})
+        self.assertNotIn('integration_missing', {item['code'] for item in blocked['blockers']})
+        review = self.attest('integrated-review', 'review', operation='merge-1',
+                             actor='responsible-agent', reviewer='independent-reviewer',
+                             head=self.fixture.head, outcome='approved', evidence='exact-review')
+        ready = cli_plan(review)
+        self.assertEqual(ready['status'], 'ready', ready['blockers'])
+        self.assertIn('integration_not_validated', {item['code'] for item in ready['warnings']})
+        observation['pr']['checks'][0]['headSha'] = self.fixture.base
+        wrong_ci = cli_plan(review)
+        self.assertIn('required_check_failed_or_pending', {item['code'] for item in wrong_ci['blockers']})
+        self.assertEqual(self.fixture.git('for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads'), before)
+        self.assertIsNone(self.app.ref_tip(self.root, 'refs/heads/main-integration'))
 
 
 if __name__ == '__main__':
