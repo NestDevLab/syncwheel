@@ -29,6 +29,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | `syncwheel_worktrees` | Registry CAS, lifecycle recovery, capture and retirement | Git, lifecycle ledger, durable storage and phase observer ports |
 | `syncwheel_cli` | Argument grammar and command behavior descriptions | Schema vocabulary; named handler registry |
 | `syncwheel_contracts` | Shared CLI/publication choice values | Manifest vocabulary |
+| `syncwheel_execution_policy` | Effective candidate/release gates, integration validation decisions and explicit evidence receipts | Canonical manifest vocabulary; pure preference and worktree policy |
 | `syncwheel_errors` | Exception identities shared across domains | None |
 
 Domains never import the CLI facade. File loading and command dispatch remain application responsibilities. Journal

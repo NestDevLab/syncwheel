@@ -5875,39 +5875,19 @@ def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings, i
                 github_blocker(blockers, 'source_remote_drift', 'remote source branch differs from stack revision', remote=remote_tip, expected=source_revision)
         except SyncwheelError as exc:
             github_blocker(blockers, 'source_remote_unavailable', str(exc))
-    integration = manifest.get('integration') or {}
-    integration_branch = integration.get('branch')
-    in_integration = stack.get('id') in integration.get('stacks', [])
-    if manifest['defaults'].get('integration_membership') == INTEGRATION_MEMBERSHIP_REQUIRED and not in_integration:
-        github_blocker(blockers, 'integration_membership', 'stack is not present in required integration')
-    elif in_integration and (not integration_branch or not branch_exists(repo_root, integration_branch)):
-        github_blocker(blockers, 'integration_missing', 'integration branch is missing')
-    elif in_integration:
-        missing = [
-            commit for commit in stack_integration_commits(stack)
-            if not branch_contains(repo_root, integration_branch, commit)
-        ]
-        # The clone-local policy may declare integration validation advisory:
-        # the PR is then judged on its own checks, pinned head and live base,
-        # and an integration branch that is behind (for example because other
-        # stacks fail to rebuild) is reported instead of blocking. Membership
-        # rules above still apply.
-        if missing and integration_validation == 'advisory':
-            warnings.append({
-                'code': 'integration_not_validated',
-                'detail': (
-                    f'{len(missing)} stack commit(s) are absent from {integration_branch}; '
-                    'the merge policy declares integration validation advisory'
-                ),
-                'commits': missing,
-            })
-        else:
-            for commit in missing:
-                github_blocker(
-                    blockers, 'integration_not_validated',
-                    f'stack commit is absent from integration: {commit}; rebuild the integration, '
-                    'or declare integration validation advisory in the clone-local merge policy',
-                )
+    integration_branch = (manifest.get('integration') or {}).get('branch')
+    integration_exists = bool(integration_branch and branch_exists(repo_root, integration_branch))
+    in_integration = stack.get('id') in (manifest.get('integration') or {}).get('stacks', [])
+    missing = [
+        commit for commit in stack_integration_commits(stack)
+        if not integration_exists or not branch_contains(repo_root, integration_branch, commit)
+    ] if in_integration else []
+    integration_blockers, integration_warnings = _execution_policy.integration_findings(
+        manifest, stack, integration_validation,
+        branch_available=integration_exists, missing=missing,
+    )
+    blockers.extend(integration_blockers)
+    warnings.extend(integration_warnings)
     for dependency_id in stack.get('depends_on', []):
         try:
             dependency = require_stack(manifest, dependency_id)
@@ -6031,9 +6011,19 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     stack = require_stack(manifest, stack_id)
     blockers = []
     warnings = []
-    validation = validate_manifest(repo_root, manifest, manifest_path)
+    validation = validate_manifest(
+        repo_root, manifest, manifest_path,
+        integration_validation=policy.get('integration', 'required'),
+    )
     for error in validation.get('errors', []):
         github_blocker(blockers, 'manifest_invalid', error)
+    primary = validation.get('details', {}).get('primary_checkout')
+    if primary:
+        _, primary_warnings = _execution_policy.primary_projection_findings(
+            primary, policy.get('integration', 'required'),
+        )
+        warnings.extend({'code': 'primary_projection_not_validated', 'detail': detail,
+                         'evidence': primary} for detail in primary_warnings)
     source_revision, declared = github_stack_git_preflight(
         repo_root, manifest, stack, blockers, warnings,
         integration_validation=policy.get('integration', 'required'),
@@ -10347,7 +10337,8 @@ def collect_repo_snapshot(repo_root, manifest):
     }
 
 
-def validate_manifest(repo_root, manifest, manifest_path=None, *, defer_stack_histories=()):
+def validate_manifest(repo_root, manifest, manifest_path=None, *, defer_stack_histories=(),
+                      integration_validation='required'):
     warnings = []
     errors = []
     deferred = frozenset(defer_stack_histories)
@@ -10418,12 +10409,11 @@ def validate_manifest(repo_root, manifest, manifest_path=None, *, defer_stack_hi
     integration_branch = integration['branch']
     primary_checkout = primary_checkout_state(repo_root, manifest)
     details['primary_checkout'] = primary_checkout
-    if not primary_checkout['compliant']:
-        errors.append(
-            f"primary worktree branch mismatch at {primary_checkout['path']}: "
-            f"expected one of {primary_checkout['expected_branches']!r}, "
-            f"found {primary_checkout['branch']!r}"
-        )
+    primary_errors, primary_warnings = _execution_policy.primary_projection_findings(
+        primary_checkout, integration_validation,
+    )
+    errors.extend(primary_errors)
+    warnings.extend(primary_warnings)
     integration_strategy = integration.get('strategy')
     declared_commits = []
     declared_commit_shas = set()

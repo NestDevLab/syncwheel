@@ -140,9 +140,13 @@ declared commit projection, and all local, integration, identity, repository,
 review and rules checks must pass. By default every commit the stack owns in
 the integration projection must be on the integration branch
 (`integration_not_validated` otherwise). A clone whose integration is often
-behind can set `--integration advisory` on the policy: missing commits then
-become one warning listing them, and the PR is validated by its own checks,
-pinned head and live base only. Membership rules still block in both modes.
+behind can set `--integration advisory` on the policy: missing commits or a
+missing local integration ref become a warning, and the PR is validated by its
+own checks, pinned head and live base only. The plan also reports a primary
+staging-layout mismatch as advisory; it never creates a local projection ref to
+satisfy this check. Global validation and integration operations retain their
+primary-layout requirements. Declared membership, published source identity,
+real dependencies, authority and forge-required checks still block in both modes.
 CI must also pass unless the clone-local policy explicitly declares
 `checks: "none"`:
 
