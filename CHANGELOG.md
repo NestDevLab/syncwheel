@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.53.6 - 2026-11-28
+
+- Add an explicitly opted-in attributed PR recovery gate with independent authority records, cross-lane actor review obligations, shared exact-lease state, and native uncertain-publication reconciliation. Keep warnings and unrelated work outside delivery penalties.
+
 ## 0.53.2 - 2026-11-27
 
 - Confine stack Git and recipe-add worktree recovery to the selected target, including pending intents, terminal registry records and path repairs. Keep unrelated lanes and lock evidence for explicit maintenance.

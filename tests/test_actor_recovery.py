@@ -1,0 +1,349 @@
+"""Verified attribution and shared recovery CAS, independent of lane identity."""
+
+import copy
+import contextlib
+import io
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+from syncwheel_actor_recovery import (
+    GitRecoveryStore, PATH, delivery_blockers, empty_state, run_command, transition,
+)
+from syncwheel_errors import SyncwheelError
+
+REPO = 'fixture-repository'
+HEAD = 'a' * 40
+
+
+def authority():
+    return {'schema_version': 1, 'repository': REPO, 'records': {}}
+
+
+def record(source, key, kind, **fields):
+    source['records'][key] = dict(kind=kind, repository=REPO, **fields)
+    return key
+
+
+class RecoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.state, self.authority = empty_state(REPO), authority()
+
+    def apply(self, action, reference, **kwargs):
+        self.state = transition(self.state, self.authority, action, reference, **kwargs)
+
+    def incident(self, number, actor='agent-a', delivery='delivery-a', recover=True):
+        key = record(self.authority, 'proof-' + number, 'incident', incident=number,
+                     actor=actor, delivery=delivery, proven=True, attributed=True,
+                     evidence='independent-investigation-' + number)
+        self.apply('confirm', key)
+        if recover:
+            key = record(self.authority, 'recovery-' + number, 'recovery', incident=number,
+                         recovered=True, attribution_verified=True, evidence='verified-recovery-' + number)
+            self.apply('recover', key)
+
+    def publication(self, operation='publish-1', actor='agent-a', delivery='another-lane', head=HEAD):
+        return record(self.authority, operation, 'publication', operation=operation,
+                      actor=actor, delivery=delivery, head=head)
+
+    def review(self, operation='publish-1', actor='agent-a', head=HEAD, reviewer='agent-reviewer'):
+        return record(self.authority, 'review-' + operation, 'review', operation=operation,
+                      actor=actor, head=head, reviewer=reviewer, outcome='approved', evidence='review-record')
+
+    def outcome(self, outcome='published', operation='publish-1', actor='agent-a', delivery='another-lane'):
+        return record(self.authority, 'outcome-' + operation, 'outcome', operation=operation,
+                      actor=actor, delivery=delivery, head=HEAD, outcome=outcome, evidence='remote-observation')
+
+    def test_warning_reporter_and_unverified_claim_never_penalize(self):
+        original = copy.deepcopy(self.state)
+        for proven, attributed in ((False, True), (True, False), (False, False)):
+            key = record(self.authority, 'unverified', 'incident', incident='one',
+                         actor='reporter', delivery='delivery-a', proven=proven,
+                         attributed=attributed, evidence='warning')
+            with self.assertRaises(SyncwheelError):
+                self.apply('confirm', key)
+            self.assertEqual(self.state, original)
+        with self.assertRaises(SyncwheelError):
+            self.apply('confirm', 'forged-local-receipt')
+
+    def test_scope_recovery_and_idempotence(self):
+        self.incident('one', recover=False)
+        before = copy.deepcopy(self.state)
+        self.apply('confirm', 'proof-one')
+        self.assertEqual(self.state, before)
+        self.assertEqual(delivery_blockers(self.state, 'delivery-a'), ['one'])
+        with self.assertRaises(SyncwheelError):
+            self.apply('prepare', self.publication(delivery='delivery-a'))
+        self.apply('prepare', self.publication(actor='unrelated-agent'))
+        # The lane successor is blocked only while this delivery is unrecovered.
+        with self.assertRaises(SyncwheelError):
+            self.apply('prepare', self.publication('successor', 'successor', 'delivery-a'))
+        key = record(self.authority, 'recovered', 'recovery', incident='one', recovered=True,
+                     attribution_verified=True, evidence='preserved-work-and-author')
+        self.apply('recover', key)
+        self.apply('recover', key)
+        self.apply('prepare', 'successor')
+
+    def test_second_distinct_incident_requires_exact_independent_review_across_lanes(self):
+        self.incident('one')
+        self.apply('confirm', 'proof-one')
+        self.apply('prepare', self.publication('first'))  # duplicate is not a second incident
+        self.incident('two')
+        self.apply('prepare', self.publication('other', actor='successor'))
+        # First uncertain publication must be reconciled before another attempt.
+        self.apply('complete', self.outcome(operation='first'))
+        publication = self.publication()
+        with self.assertRaises(SyncwheelError):
+            self.apply('prepare', publication)
+        for head, reviewer in (('b' * 40, 'reviewer'), (HEAD, 'agent-a')):
+            with self.assertRaises(SyncwheelError):
+                self.apply('prepare', publication, review=self.review(head=head, reviewer=reviewer))
+        self.apply('prepare', publication, review=self.review())
+        with self.assertRaises(SyncwheelError):
+            self.apply('prepare', publication, review='review-publish-1')
+        self.assertNotIn('agent-a', self.state['reviewed_through'])
+        self.apply('complete', self.outcome())
+        before = copy.deepcopy(self.state)
+        self.apply('complete', 'outcome-publish-1')
+        self.assertEqual(self.state, before)
+        self.apply('prepare', self.publication('next'))
+
+    def test_failed_or_uncertain_publication_does_not_consume_review(self):
+        self.incident('one')
+        self.incident('two')
+        self.apply('prepare', self.publication(), review=self.review())
+        with self.assertRaises(SyncwheelError):
+            self.apply('complete', self.outcome('unknown'))
+        self.apply('complete', self.outcome('not_published'))
+        with self.assertRaises(SyncwheelError):
+            self.apply('prepare', self.publication('retry'))
+        self.apply('prepare', 'retry', review=self.review('retry'))
+        self.incident('three')
+        self.apply('complete', self.outcome(operation='retry'))
+        self.assertEqual(self.state['reviewed_through']['agent-a'], ['one', 'two'])
+        with self.assertRaises(SyncwheelError):
+            self.apply('prepare', self.publication('after-new-incident'))
+
+    def test_incident_or_terminal_collision_cannot_rewrite_evidence(self):
+        self.incident('one')
+        self.authority['records']['proof-one']['actor'] = 'successor'
+        with self.assertRaises(SyncwheelError):
+            self.apply('confirm', 'proof-one')
+        self.apply('prepare', self.publication())
+        self.apply('complete', self.outcome())
+        with self.assertRaises(SyncwheelError):
+            self.apply('complete', self.outcome('not_published'))
+
+
+class SharedGitTest(unittest.TestCase):
+    def git(self, root, *args):
+        return subprocess.check_output(['git', '-C', str(root), *args], text=True,
+                                       stderr=subprocess.DEVNULL).strip()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='actor-recovery-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.remote = self.root / 'remote.git'
+        self.remote.mkdir()
+        self.git(self.remote, 'init', '--bare')
+        self.clones = []
+        for name in ('writer', 'peer'):
+            clone = self.root / name
+            self.git(self.root, 'clone', str(self.remote), str(clone))
+            self.git(clone, 'config', 'user.name', 'Fixture')
+            self.git(clone, 'config', 'user.email', 'fixture@example.invalid')
+            self.clones.append(clone)
+        self.state_ref, self.authority_ref = 'refs/heads/recovery-state', 'refs/heads/recovery-authority'
+        self.provision(self.state_ref, empty_state(REPO))
+        source = authority()
+        for number in ('one', 'two'):
+            record(source, number, 'incident', incident=number, actor='agent-a', delivery=number,
+                   proven=True, attributed=True, evidence='maintainer-investigation-' + number)
+        self.provision(self.authority_ref, source)
+        self.stores = [GitRecoveryStore(clone, 'origin', self.state_ref, self.authority_ref, REPO)
+                       for clone in self.clones]
+
+    def provision(self, ref, document):
+        clone = self.clones[0]
+        path = clone / PATH
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(document))
+        self.git(clone, 'add', PATH)
+        self.git(clone, 'commit', '-m', 'Fixture authority')
+        self.git(clone, 'push', 'origin', 'HEAD:' + ref)
+
+    def test_two_clones_share_state_stale_cas_refuses_and_preserves_worktrees(self):
+        first, second = self.stores
+        stale = second.snapshot()
+        before = [self.git(clone, 'status', '--porcelain') for clone in self.clones]
+        sha = first.apply(first.snapshot(), 'confirm', 'one')
+        with self.assertRaises(SyncwheelError):
+            second.apply(stale, 'confirm', 'two')
+        self.assertEqual(second.snapshot()['state_sha'], sha)
+        result = run_command(second, 'confirm', 'two')
+        self.assertFalse(result['applied'])
+        run_command(second, 'confirm', 'two', apply=True)
+        self.assertEqual(sorted(first.snapshot()['state']['incidents']), ['one', 'two'])
+        current = first.snapshot()
+        self.assertEqual(first.apply(current, 'confirm', 'one'), current['state_sha'])
+        self.assertEqual(before, [self.git(clone, 'status', '--porcelain') for clone in self.clones])
+
+    def test_missing_store_or_wrong_repository_fails_closed(self):
+        store = GitRecoveryStore(self.clones[0], 'origin', 'refs/heads/missing', self.authority_ref, REPO)
+        with self.assertRaises(SyncwheelError):
+            store.snapshot()
+        store = GitRecoveryStore(self.clones[0], 'origin', self.state_ref, self.authority_ref, 'wrong')
+        with self.assertRaises(SyncwheelError):
+            store.snapshot()
+
+    def test_actual_remote_cas_race_never_loses_peer_event(self):
+        writer, peer = self.stores
+        before = writer.snapshot()
+        native_git = writer.git
+
+        def racing_git(*args, **kwargs):
+            if args[0] == 'push':
+                peer.apply(peer.snapshot(), 'confirm', 'two')
+            return native_git(*args, **kwargs)
+
+        with mock.patch.object(writer, 'git', side_effect=racing_git):
+            with self.assertRaisesRegex(SyncwheelError, 'Git operation refused'):
+                writer.apply(before, 'confirm', 'one')
+        self.assertEqual(list(writer.snapshot()['state']['incidents']), ['two'])
+
+
+class MergeEntryPointTest(unittest.TestCase):
+    """Existing real merge handler; fake only the external forge observation."""
+
+    def setUp(self):
+        import test_github_pr_merge as fixtures
+        self.app = fixtures.SYNCWHEEL
+        self.fixture = fixtures.GithubPrMergeTest()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.root = self.fixture.repo
+        self.repository = self.fixture.policy()['repository']
+        self.state_ref, self.authority_ref = 'refs/heads/recovery-state', 'refs/heads/recovery-authority'
+        self.store = GitRecoveryStore(self.root, 'origin', self.state_ref, self.authority_ref, self.repository)
+        self.profile = {'hooks': {'mode': 'required'}, 'github_pr_merge': self.fixture.policy(),
+                        'actor_recovery': {'enabled': True, 'remote': 'origin',
+                            'state_ref': self.state_ref, 'authority_ref': self.authority_ref,
+                            'repository': self.repository, 'product_refs': {'refs/heads/main': 'product'}}}
+        self.write_profile()
+        self.fixture.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        self.fixture.manifest_path.write_text(json.dumps(self.fixture.manifest) + '\n')
+        self.authority = {'schema_version': 1, 'repository': self.repository, 'records': {}}
+        self.provision(self.state_ref, empty_state(self.repository))
+        self.provision(self.authority_ref, self.authority)
+
+    def write_profile(self):
+        (self.root / '.syncwheel/profile.local.json').write_text(json.dumps(self.profile))
+
+    def provision(self, ref, document):
+        blob = self.store.git('hash-object', '-w', '--stdin', input=json.dumps(document))
+        subtree = self.store.git('mktree', input='100644 blob ' + blob + '\tactor-recovery.json\n')
+        tree = self.store.git('mktree', input='040000 tree ' + subtree + '\t.syncwheel\n')
+        prior = self.store.git('ls-remote', '--refs', 'origin', ref)
+        parent = ['-p', prior.split()[0]] if prior else []
+        commit = self.store.git('commit-tree', tree, *parent, input='Fixture attestation\n')
+        self.store.git('push', 'origin', commit + ':' + ref)
+
+    def attest(self, key, kind, **fields):
+        self.authority['records'][key] = dict(kind=kind, repository=self.repository, **fields)
+        self.provision(self.authority_ref, self.authority)
+        return key
+
+    def preview(self, reference='publication', review=None):
+        args = self.fixture.args()
+        args.actor_publication, args.actor_review = reference, review
+        with mock.patch.object(self.app, 'validate_manifest', return_value={'errors': []}), \
+             mock.patch.object(self.app, 'github_adapter_request', return_value=self.fixture.observation()):
+            return self.app.build_github_pr_merge_plan(self.root, self.fixture.manifest,
+                                                      self.fixture.manifest_path, 'feature', args)
+
+    def binding(self, actor='responsible-agent'):
+        return self.attest('publication', 'publication', operation='merge-1', actor=actor,
+                           delivery='product', head=self.fixture.head, base_sha=self.fixture.base,
+                           base_branch='main', pull_request=25)
+
+    def incidents(self, actor='responsible-agent'):
+        for incident in ('one', 'two'):
+            proof = self.attest(incident, 'incident', incident=incident, actor=actor,
+                                delivery='prior-delivery', proven=True, attributed=True,
+                                evidence='independent-proof-' + incident)
+            self.store.apply(self.store.snapshot(), 'confirm', proof)
+            recovered = self.attest('recover-' + incident, 'recovery', incident=incident,
+                                    recovered=True, attribution_verified=True, evidence='recovery-' + incident)
+            self.store.apply(self.store.snapshot(), 'recover', recovered)
+
+    def apply_merge(self, plan, binding, review=None, *, interruption=False):
+        args = self.fixture.args(apply=True, plan_digest=plan['planDigest'])
+        args.actor_publication, args.actor_review = binding, review
+        merged = self.fixture.observation(state='MERGED', decision='APPROVED')
+        merged['pr'].update(mergeCommit='f' * 40, mergedAt='2026-01-01T00:00:00Z')
+        results = [self.fixture.observation(), {'ok': True}, merged]
+        if interruption:
+            results[2] = RuntimeError('lost remote response')
+        with mock.patch.object(self.app, 'validate_manifest', return_value={'errors': []}), \
+             mock.patch.object(self.app, 'github_adapter_request', side_effect=results), \
+             mock.patch.object(self.app, 'github_pr_merge_postverify', return_value={'status': 'verified'}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            return self.app.command_stack_merge_pr(args)
+
+    def test_normal_new_lane_author_and_unrelated_agent_are_not_penalized(self):
+        self.incidents(actor='another-agent')
+        binding = self.binding(actor='legitimate-successor')
+        self.assertEqual(self.apply_merge(self.preview(), binding), 0)
+        state = self.store.snapshot()['state']
+        self.assertEqual(state['operations']['merge-1']['outcome']['outcome'], 'published')
+        self.assertEqual(state['reviewed_through'], {})
+
+    def test_exact_review_required_then_consumed_only_on_remote_success(self):
+        self.incidents()
+        binding = self.binding()
+        plan = self.preview()
+        with self.assertRaises(SyncwheelError):
+            self.apply_merge(plan, binding)
+        self.assertEqual(self.store.snapshot()['state']['operations'], {})
+        review = self.attest('review', 'review', operation='merge-1', actor='responsible-agent',
+                             reviewer='independent-reviewer', head=self.fixture.head,
+                             outcome='approved', evidence='exact-review')
+        self.assertEqual(self.apply_merge(self.preview(review=review), binding, review), 0)
+        self.assertEqual(self.store.snapshot()['state']['reviewed_through']['responsible-agent'], ['one', 'two'])
+
+    def test_crash_after_real_publication_reservation_native_readback_is_idempotent(self):
+        from syncwheel_actor_recovery import reconcile_reference
+        binding = self.binding()
+        with self.assertRaisesRegex(RuntimeError, 'lost remote response'):
+            self.apply_merge(self.preview(), binding, interruption=True)
+        self.assertIsNone(self.store.snapshot()['state']['operations']['merge-1']['outcome'])
+        unknown = self.fixture.observation(state='CLOSED')
+        self.assertEqual(reconcile_reference(self.root, self.profile, binding, lambda request: unknown)['status'], 'unknown')
+        merged = self.fixture.observation(state='MERGED')
+        merged['pr'].update(mergeCommit='f' * 40, mergedAt='2026-01-01T00:00:00Z')
+        for _ in range(2):
+            result = reconcile_reference(self.root, self.profile, binding, lambda request: merged)
+            self.assertEqual(result['status'], 'published')
+        self.assertEqual(len(self.store.snapshot()['state']['operations']), 1)
+
+    def test_alternative_real_product_push_refused_work_ref_and_nonoptin_unchanged(self):
+        for command in (
+                ['git', 'push', 'origin', self.fixture.head + ':refs/heads/main'],
+                ['git', '-c', 'advice.pushUpdateRejected=false', 'push', '--repo=origin', self.fixture.head + ':main'],
+                ['git', 'push', '--repo', 'origin', self.fixture.head + ':main']):
+            with self.assertRaisesRegex(SyncwheelError, 'product target'):
+                self.app.run(command, cwd=self.root)
+        self.app.run(['git', 'push', 'origin', self.fixture.head + ':refs/heads/another-work-lane'], cwd=self.root)
+        del self.profile['actor_recovery']
+        self.write_profile()
+        # A dry product push follows ordinary Git/server rules when not opted in.
+        result = self.app.run(['git', 'push', '--dry-run', 'origin', self.fixture.head + ':refs/heads/main'], cwd=self.root)
+        self.assertEqual(result.returncode, 0)
+
+
+if __name__ == '__main__':
+    unittest.main()

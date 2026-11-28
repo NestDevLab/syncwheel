@@ -40,6 +40,7 @@ py-modules = [
   "syncwheel_worktree_policy",
   "syncwheel_policy",
   "syncwheel_execution_policy",
+  "syncwheel_actor_recovery",
   "syncwheel_private_json",
   "syncwheel_update_policy",
   "syncwheel_test_slot",
