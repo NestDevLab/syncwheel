@@ -56,7 +56,7 @@ class IndependentPrCiTest(unittest.TestCase):
             'required_status_checks': {'contexts': ['required-ci']},
         }
 
-    def plan(self, *, floor=False):
+    def plan(self, *, floor=False, observation_error=None):
         f = self.fixture
         f.manifest_path.write_text(json.dumps(f.manifest) + '\n')
         path = f.repo / '.syncwheel/profile.local.json'
@@ -67,7 +67,8 @@ class IndependentPrCiTest(unittest.TestCase):
         if floor:
             report = apply_required_floor(report, {'integration_validation': 'required'},
                                           authority='verified required integration contract')
-        with mock.patch.object(SW, 'github_adapter_request', return_value=self.observation), \
+        with mock.patch.object(SW, 'github_adapter_request', return_value=self.observation,
+                               side_effect=observation_error), \
              mock.patch.object(SW, 'execution_policy_report', return_value=report):
             return SW.build_github_pr_merge_plan(f.repo, f.manifest, f.manifest_path,
                                                 'feature', f.args())
@@ -163,6 +164,36 @@ class IndependentPrCiTest(unittest.TestCase):
         after = (f.git('rev-parse', 'HEAD'), (f.repo / '.git/index').read_bytes(),
                  f.git('diff', '--binary'), (f.repo / 'untracked.txt').read_bytes())
         self.assertEqual(before, after)
+
+    def assert_observation_failure_is_read_only(self, code, *, error=None):
+        f = self.fixture
+        # Materialize the selected private configuration before measuring.
+        self.plan()
+        before = (f.git('for-each-ref', '--format=%(refname) %(objectname)'),
+                  f.git('rev-parse', 'HEAD'), (f.repo / '.git/index').read_bytes(),
+                  f.manifest_path.read_bytes(), f.git('status', '--porcelain'))
+        plan = self.plan(observation_error=error)
+        self.assertEqual('blocked', plan['status'])
+        self.assertIn(code, self.codes(plan))
+        self.assertFalse(plan['primaryProjectionEvidence']['sourceVerified'])
+        self.assertFalse(plan['primaryProjectionEvidence']['authorized'])
+        self.assertIsNone(plan['primaryProjectionEvidence']['fetchedSha'])
+        self.assertEqual(before, (f.git('for-each-ref', '--format=%(refname) %(objectname)'),
+                                f.git('rev-parse', 'HEAD'), (f.repo / '.git/index').read_bytes(),
+                                f.manifest_path.read_bytes(), f.git('status', '--porcelain')))
+        self.assertEqual([], list((f.repo / '.syncwheel/ledger').rglob('*')))
+
+    def test_missing_pr_returns_blocked_plan_without_effects(self):
+        self.observation.update(pr=None, selection={'count': 0})
+        self.assert_observation_failure_is_read_only('pull_request_not_found')
+
+    def test_ambiguous_pr_returns_blocked_plan_without_effects(self):
+        self.observation.update(pr=None, selection={'count': 2})
+        self.assert_observation_failure_is_read_only('pull_request_ambiguous')
+
+    def test_observation_error_returns_blocked_plan_without_effects(self):
+        self.assert_observation_failure_is_read_only(
+            'github_observation_failed', error=SW.SyncwheelError('fixture observation failed'))
 
     def test_global_validation_still_requires_the_primary_integration_layout(self):
         self.plan()

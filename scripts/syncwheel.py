@@ -6071,6 +6071,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
                        'effective gh actor has no verified repository write permission' if operational_preferences else
                        'effective gh actor has no repository admin permission')
     checks, superseded_checks, out_of_scope_checks = [], [], []
+    candidate_evidence = {}
     if isinstance(pr, dict):
         if pr_number is not None and pr.get('number') != int(pr_number):
             github_blocker(blockers, 'pull_request_number_mismatch', 'observed PR number differs from the stack declaration')
@@ -6205,6 +6206,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         allowed_bypasses=policy['allowed_bypasses'],
         warnings=warnings,
     )
+    fetched_base_sha = None
     try:
         target_base_sha = remote_ref_tips(
             repo_root,
@@ -6247,7 +6249,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
                 projection_evidence = _execution_policy.absent_projection_authorization(
                     primary, manifest, canonical, authority, manifest_authority(canonical),
                     base_branch=base_branch, target_remote=stack.get('target_remote') or manifest['defaults']['publication_remote'],
-                    target_sha=target_base_sha, fetched_sha=fetched_base_sha if pr else None,
+                    target_sha=target_base_sha, fetched_sha=fetched_base_sha,
                     forge_base_sha=(pr or {}).get('baseRefOid'),
                     local_projection=ref_tip(repo_root, f'refs/heads/{canonical_branch}'),
                     tracking_projection=ref_tip(repo_root, f'refs/remotes/{integration_remote}/{canonical_branch}'),
@@ -6255,10 +6257,10 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
                 )
                 projection_evidence.update(
                     commit=target_base_sha, path='.syncwheel/manifest.json',
-                    sourceVerified=(target_base_sha == fetched_base_sha == (pr or {}).get('baseRefOid')),
+                    sourceVerified=(bool(pr) and target_base_sha == fetched_base_sha == pr.get('baseRefOid')),
                     fetchedSha=fetched_base_sha, forgeBaseSha=(pr or {}).get('baseRefOid'),
                 )
-        except (SyncwheelError, KeyError, TypeError, ValueError) as exc:
+        except SyncwheelError as exc:
             projection_evidence = {'authorized': False, 'sourceVerified': False, 'reason': str(exc)}
     if policy.get('integration') == 'advisory' and not primary['compliant'] and not projection_evidence['sourceVerified']:
         detail = 'advisory primary layout requires a verified published target control manifest'
@@ -6327,7 +6329,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'policy': policy,
         'executionPolicy': execution_report,
         'operationalPreferencesActive': operational_preferences,
-        'candidateEvidence': candidate_evidence if isinstance(pr, dict) else {},
+        'candidateEvidence': candidate_evidence,
         'releaseEvidence': _execution_policy.release_status(execution_report, load_repo_profile(worktree_policy_root(repo_root)), source_revision),
         'authority': authority,
         'authorityProvenance': authority_provenance,
