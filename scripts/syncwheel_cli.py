@@ -245,6 +245,7 @@ def build_parser(commands, version):
     recovery_actions = recovery.add_subparsers(dest='recovery_action', required=True)
     for action in ('status', 'confirm', 'recover', 'complete', 'reconcile'):
         recovery_action = recovery_actions.add_parser(action, parents=[common])
+        recovery_action.add_argument('--remote', default='origin', help='repository publication remote')
         if action != 'status':
             recovery_action.add_argument('--reference', required=True, help='record ID on independent authority ref')
             recovery_action.add_argument('--apply', action='store_true')

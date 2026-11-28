@@ -6281,6 +6281,8 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             'headSha': pr.get('headRefOid'),
             'baseSha': pr.get('baseRefOid'),
         },
+        'recoveryRemote': ((observation or {}).get('repositoryInfo') or {}).get('cloneUrl')
+            or 'https://github.com/' + policy['repository'] + '.git',
         'headSha': pr.get('headRefOid'),
         'baseSha': target_base_sha,
         'author': pr.get('author'),
@@ -6442,10 +6444,10 @@ def command_stack_merge_pr(args):
         )
         if existing:
             profile = load_repo_profile(worktree_policy_root(repo_root))
-            if profile.get('actor_recovery') is not None:
-                prepared = next((event['payload']['plan'] for event in reversed(
+            prepared = next((event['payload']['plan'] for event in reversed(
                     github_pr_merge_events(repo_root, manifest_path, args.operation_id))
                     if event['type'] == 'github_pr_merge_prepared'), None)
+            if prepared is not None and prepared.get('actorRecovery') is not None:
                 if prepared is None:
                     raise SyncwheelError('actor recovery requires original prepared PR evidence')
                 observed = github_adapter_request(repo_root, {
@@ -6477,6 +6479,7 @@ def command_stack_merge_pr(args):
             reference=getattr(args, 'actor_publication', None), review=getattr(args, 'actor_review', None))
         record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_started', plan, status='started')
         record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_prepared', plan, status='prepared')
+        _actor_recovery.start_merge(repo_root, plan, getattr(args, 'actor_publication', None))
         merge_result = github_adapter_request(repo_root, {
             'operation': 'merge',
             'repository': plan['repository'],
@@ -6503,7 +6506,7 @@ def command_stack_merge_pr(args):
 
 def command_actor_recovery(args):
     root = worktree_policy_root(resolve_repo_root(args.repo))
-    profile = load_repo_profile(root)
+    profile = _actor_recovery.repository_profile(root, getattr(args, 'remote', 'origin'))
     store = _actor_recovery.from_profile(root, profile)
     if store is None:
         raise SyncwheelError('actor recovery is not enabled by repository owner configuration')

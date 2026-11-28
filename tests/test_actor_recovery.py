@@ -13,6 +13,8 @@ from unittest import mock
 from syncwheel_actor_recovery import (
     GitRecoveryStore, PATH, delivery_blockers, empty_state, run_command, transition,
 )
+import syncwheel_actor_recovery as recovery_module
+STATE_REF = getattr(recovery_module, 'STATE_REF', 'refs/heads/syncwheel/actor-recovery')
 from syncwheel_errors import SyncwheelError
 
 REPO = 'fixture-repository'
@@ -157,7 +159,7 @@ class SharedGitTest(unittest.TestCase):
             self.git(clone, 'config', 'user.name', 'Fixture')
             self.git(clone, 'config', 'user.email', 'fixture@example.invalid')
             self.clones.append(clone)
-        self.state_ref, self.authority_ref = 'refs/heads/recovery-state', 'refs/heads/recovery-authority'
+        self.state_ref, self.authority_ref = STATE_REF, 'refs/heads/recovery-authority'
         self.provision(self.state_ref, empty_state(REPO))
         source = authority()
         for number in ('one', 'two'):
@@ -245,7 +247,7 @@ class MergeEntryPointTest(unittest.TestCase):
         self.addCleanup(self.fixture.tearDown)
         self.root = self.fixture.repo
         self.repository = self.fixture.policy()['repository']
-        self.state_ref, self.authority_ref = 'refs/heads/recovery-state', 'refs/heads/recovery-authority'
+        self.state_ref, self.authority_ref = STATE_REF, 'refs/heads/recovery-authority'
         self.store = GitRecoveryStore(self.root, 'origin', self.state_ref, self.authority_ref, self.repository)
         self.profile = {'hooks': {'mode': 'required'}, 'github_pr_merge': self.fixture.policy(),
                         'actor_recovery': {'enabled': True, 'remote': 'origin',
@@ -255,11 +257,20 @@ class MergeEntryPointTest(unittest.TestCase):
         self.fixture.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         self.fixture.manifest_path.write_text(json.dumps(self.fixture.manifest) + '\n')
         self.authority = {'schema_version': 1, 'repository': self.repository, 'records': {}}
-        self.provision(self.state_ref, empty_state(self.repository))
+        initial = empty_state(self.repository)
+        initial['policy'] = self.profile['actor_recovery']
+        self.provision(self.state_ref, initial)
         self.provision(self.authority_ref, self.authority)
 
     def write_profile(self):
         (self.root / '.syncwheel/profile.local.json').write_text(json.dumps(self.profile))
+
+    def peer_store(self):
+        peer = self.fixture.tmp / 'peer'
+        subprocess.run(['git', 'clone', '-q', '--no-checkout', str(self.fixture.remote), str(peer)], check=True)
+        subprocess.run(['git', '-C', str(peer), 'config', 'user.name', 'Peer'], check=True)
+        subprocess.run(['git', '-C', str(peer), 'config', 'user.email', 'peer@example.invalid'], check=True)
+        return GitRecoveryStore(peer, 'origin', self.state_ref, self.authority_ref, self.repository)
 
     def provision(self, ref, document):
         blob = self.store.git('hash-object', '-w', '--stdin', input=json.dumps(document))
@@ -369,6 +380,123 @@ class MergeEntryPointTest(unittest.TestCase):
         # A dry product push follows ordinary Git/server rules when not opted in.
         result = self.app.run(['git', 'push', '--dry-run', 'origin', self.fixture.head + ':refs/heads/main'], cwd=self.root)
         self.assertEqual(result.returncode, 0)
+
+    def test_review_r1_deleted_local_optin_cannot_clear_remote_actor_requirement(self):
+        self.incidents()
+        self.binding()
+        del self.profile['actor_recovery']
+        self.write_profile()
+        plan = self.preview()
+        self.assertEqual(plan['status'], 'blocked')
+        self.assertEqual(self.store.snapshot()['state']['operations'], {})
+        peer = self.peer_store()
+        self.assertFalse((peer.root / '.syncwheel/profile.local.json').exists())
+        report = recovery_module.preview_merge(peer.root, {}, plan, reference='publication')
+        self.assertEqual(report['status'], 'blocked')
+
+    def test_review_r2_local_target_change_cannot_remove_canonical_gate(self):
+        binding = self.binding()
+        plan = self.preview()
+        self.profile['actor_recovery']['product_refs'] = []
+        self.write_profile()
+        reserved = recovery_module.reserve_merge(self.root, self.profile, plan, reference=binding)
+        self.assertIsNotNone(reserved)
+
+    def test_review_r2_canonical_target_policy_changed_after_preview_refuses_before_reservation(self):
+        binding = self.binding()
+        plan = self.preview()
+        state = self.store.snapshot()['state']
+        state['policy']['product_refs'] = ['refs/heads/other-product']
+        self.provision(self.state_ref, state)
+        with self.assertRaisesRegex(SyncwheelError, 'policy changed'):
+            recovery_module.reserve_merge(self.root, self.profile, plan, reference=binding)
+        self.assertEqual(self.store.snapshot()['state']['operations'], {})
+
+    def test_review_r2_policy_changes_after_reservation_refuse_effect(self):
+        binding = self.binding()
+        plan = self.preview()
+        recovery_module.reserve_merge(self.root, self.profile, plan, reference=binding)
+        state = self.store.snapshot()['state']
+        state['policy']['product_refs'] = ['refs/heads/other-product']
+        self.provision(self.state_ref, state)
+        with self.assertRaisesRegex(SyncwheelError, 'policy changed'):
+            recovery_module.start_merge(self.root, plan, binding)
+        self.assertEqual(self.store.snapshot()['state']['operations']['merge-1']['phase'], 'prepared')
+
+    def test_review_r1_manifest_remote_alias_cannot_redirect_forge_policy(self):
+        self.incidents()
+        binding = self.binding()
+        plan = self.preview()
+        plan['targetRemote'] = 'candidate-chosen-fork'
+        report = recovery_module.preview_merge(self.root, {}, plan, reference=binding)
+        self.assertEqual(report['status'], 'blocked')
+
+    def test_review_r3_real_remote_cas_confirm_beats_effect_start(self):
+        binding = self.binding()
+        proof = self.attest('late-proof', 'incident', incident='late-proof', actor='responsible-agent',
+                            delivery='product', proven=True, attributed=True, evidence='independent-proof')
+        plan = self.preview()
+        recovery_module.reserve_merge(self.root, self.profile, plan, reference=binding)
+        peer = self.peer_store()
+        original_git = GitRecoveryStore.git
+        injected = False
+
+        def racing_git(store, *args, **kwargs):
+            nonlocal injected
+            if args[0] == 'push' and not injected:
+                injected = True
+                peer.apply(peer.snapshot(), 'confirm', proof)
+            return original_git(store, *args, **kwargs)
+
+        with mock.patch.object(GitRecoveryStore, 'git', racing_git):
+            with self.assertRaisesRegex(SyncwheelError, 'Git operation refused'):
+                recovery_module.start_merge(self.root, plan, binding)
+        state = peer.snapshot()['state']
+        self.assertEqual(delivery_blockers(state, 'product'), ['late-proof'])
+        self.assertEqual(state['operations']['merge-1']['phase'], 'prepared')
+
+    def test_review_r3_confirm_before_effect_wins_across_clones(self):
+        binding = self.binding()
+        proof = self.attest('late-proof', 'incident', incident='late-proof', actor='responsible-agent',
+                            delivery='product', proven=True, attributed=True, evidence='independent-proof')
+        plan = self.preview()
+        peer = self.peer_store()
+        native_event = self.app.record_github_pr_merge_event
+
+        def confirm_after_reservation(root, manifest_path, event_type, event_plan, **kwargs):
+            result = native_event(root, manifest_path, event_type, event_plan, **kwargs)
+            if event_type == 'github_pr_merge_prepared':
+                peer.apply(peer.snapshot(), 'confirm', proof)
+            return result
+
+        with mock.patch.object(self.app, 'record_github_pr_merge_event', side_effect=confirm_after_reservation):
+            with self.assertRaisesRegex(SyncwheelError, 'confirmed delivery hold'):
+                self.apply_merge(plan, binding)
+        self.assertEqual(delivery_blockers(peer.snapshot()['state'], 'product'), ['late-proof'])
+
+    def test_review_r3_effect_start_wins_pending_proof_preserved_then_promoted(self):
+        binding = self.binding()
+        proof = self.attest('late-proof', 'incident', incident='late-proof', actor='responsible-agent',
+                            delivery='product', proven=True, attributed=True, evidence='independent-proof')
+        plan = self.preview()
+        recovery_module.reserve_merge(self.root, self.profile, plan, reference=binding)
+        recovery_module.start_merge(self.root, plan, binding)
+        peer = self.peer_store()
+        peer.apply(peer.snapshot(), 'confirm', proof)
+        state = peer.snapshot()['state']
+        self.assertEqual(delivery_blockers(state, 'product'), [])
+        self.assertIn('late-proof', state['pending_incidents'])
+        # Another work release is free while this effect is unresolved.
+        other = self.attest('other-publication', 'publication', operation='other', actor='other-agent',
+                            delivery='other-work', head=self.fixture.head)
+        peer.apply(peer.snapshot(), 'prepare', other)
+        peer.apply(peer.snapshot(), 'start', other)
+        merged = self.fixture.observation(state='MERGED')
+        merged['pr'].update(mergeCommit='f' * 40, mergedAt='2026-01-01T00:00:00Z')
+        recovery_module.reconcile_reference(self.root, self.profile, binding, lambda request: merged)
+        state = peer.snapshot()['state']
+        self.assertEqual(delivery_blockers(state, 'product'), ['late-proof'])
+        self.assertEqual(state['pending_incidents'], {})
 
 
 if __name__ == '__main__':

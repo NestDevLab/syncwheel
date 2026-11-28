@@ -121,6 +121,7 @@ class GithubPrMergeTest(unittest.TestCase):
             'repository': 'NestDevLab/agent-core-toolkit-public',
             'identity': {'login': 'Yehonal'},
             'repositoryInfo': {
+                'cloneUrl': str(self.remote),
                 'permissions': {'admin': True},
                 'allowMergeMethods': {'squash': True, 'merge': True, 'rebase': True},
             },

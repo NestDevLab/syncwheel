@@ -25,9 +25,9 @@ Call it immediately before the real publisher, preserving its operation ID. A
 crash leaves the reservation; reconcile a proven outcome, never blindly republish.
 complete consumes repeat-review debt only after proven publication, not preview,
 tests, failed push, merge preparation or reporting. New incidents remain owed.
-The publication owner must serialize its final gate and actual effect against
-incident recording (its existing publication lease); this module cannot lock a
-forge transaction. It must recheck the returned state revision under that lease.
+The durable effect-start CAS serializes confirmed holds and the beginning of
+the effect interval. Evidence arriving after it remains pending until terminal
+readback. This does not pretend that Git and forge share an atomic transaction.
 """
 
 import copy
@@ -39,11 +39,12 @@ import subprocess
 from syncwheel_errors import SyncwheelError
 
 PATH = '.syncwheel/actor-recovery.json'
+STATE_REF = 'refs/heads/syncwheel/actor-recovery'
 
 
 def empty_state(repository):
     return {'schema_version': 1, 'repository': repository, 'incidents': {},
-            'operations': {}, 'reviewed_through': {}}
+            'operations': {}, 'reviewed_through': {}, 'pending_incidents': {}}
 
 
 def _text(value, name):
@@ -77,7 +78,7 @@ def transition(state, authority, action, reference, *, review=None):
     repository = _text(result.get('repository'), 'repository')
     if result.get('schema_version') != 1:
         raise SyncwheelError('unsupported actor recovery state schema')
-    kinds = {'confirm': 'incident', 'recover': 'recovery', 'prepare': 'publication',
+    kinds = {'confirm': 'incident', 'recover': 'recovery', 'prepare': 'publication', 'start': 'publication',
              'complete': 'outcome'}
     if action not in kinds:
         raise SyncwheelError('unsupported actor recovery action')
@@ -89,10 +90,16 @@ def transition(state, authority, action, reference, *, review=None):
         for name in ('incident', 'actor', 'delivery', 'evidence'):
             _text(record.get(name), name)
         incident = record['incident']
-        existing = incidents.get(incident)
+        pending = result.setdefault('pending_incidents', {})
+        existing = incidents.get(incident) or pending.get(incident)
         if existing is not None and existing['proof'] != record:
             raise SyncwheelError('incident identity collision; retain original attribution')
-        incidents.setdefault(incident, {'proof': record, 'recovery': None})
+        if any(item.get('phase') == 'executing' and item['outcome'] is None
+               and item['publication']['delivery'] == record['delivery'] for item in operations.values()):
+            if incident not in incidents:
+                pending.setdefault(incident, {'proof': record, 'recovery': None})
+        else:
+            incidents.setdefault(incident, {'proof': record, 'recovery': None})
     elif action == 'recover':
         incident = incidents.get(record.get('incident'))
         if incident is None or record.get('recovered') is not True or record.get('attribution_verified') is not True:
@@ -129,8 +136,26 @@ def transition(state, authority, action, reference, *, review=None):
                     or _text(accepted.get('reviewer'), 'reviewer') == actor):
                 raise SyncwheelError('independent review must match agent, operation and exact SHA')
             _text(accepted.get('evidence'), 'review evidence')
-        operations[operation] = {'publication': record, 'review': accepted,
+        operations[operation] = {'publication': record, 'review': accepted, 'phase': 'prepared',
                                  'covered_incidents': confirmed if owed else [], 'outcome': None}
+    elif action == 'start':
+        operation = operations.get(record.get('operation'))
+        if operation is None or operation['publication'] != record or operation['outcome'] is not None:
+            raise SyncwheelError('effect requires its exact pending publication reservation')
+        if operation.get('phase') != 'prepared':
+            raise SyncwheelError('effect already started; reconcile instead of repeating publication')
+        if delivery_blockers(result, record['delivery']):
+            raise SyncwheelError('confirmed delivery hold won before publication effect')
+        if any(other is not operation and other.get('phase') == 'executing'
+               and other['outcome'] is None and other['publication']['delivery'] == record['delivery']
+               for other in operations.values()):
+            raise SyncwheelError('same delivery already has an executing publication')
+        # A second incident elsewhere by this actor may have arrived after prepare.
+        confirmed = {key for key, item in incidents.items() if item['proof']['actor'] == record['actor']}
+        owed = len(confirmed) >= 2 and bool(confirmed - set(result['reviewed_through'].get(record['actor'], [])))
+        if owed and (operation['review'] is None or confirmed - set(operation['covered_incidents'])):
+            raise SyncwheelError('new confirmed actor incident requires a fresh reviewed reservation')
+        operation['phase'] = 'executing'
     else:
         operation = operations.get(record.get('operation'))
         if operation is None:
@@ -144,6 +169,10 @@ def transition(state, authority, action, reference, *, review=None):
         if operation['outcome'] is not None and operation['outcome'] != record:
             raise SyncwheelError('publication terminal outcome collision')
         operation['outcome'] = record
+        for key, pending in list(result.setdefault('pending_incidents', {}).items()):
+            if pending['proof']['delivery'] == publication['delivery']:
+                incidents.setdefault(key, pending)
+                del result['pending_incidents'][key]
         if record['outcome'] == 'published' and operation['review'] is not None:
             actor = publication['actor']
             result['reviewed_through'][actor] = sorted(set(
@@ -169,6 +198,10 @@ def run_command(store, action, reference=None, *, review=None, apply=False):
     proposed = transition(snapshot['state'], snapshot['authority'], action, reference, review=review)
     result = {'applied': False, 'state_sha': snapshot['state_sha'],
               'authority_sha': snapshot['authority_sha'], 'proposed': proposed}
+    if action == 'confirm':
+        incident = _record(snapshot['authority'], reference, 'incident', store.repository)['incident']
+        result['confirmation'] = ('pending_effect' if incident in proposed.get('pending_incidents', {})
+                                  else 'confirmed')
     if apply:
         result['state_sha'] = store.apply(snapshot, action, reference, review=review)
         result['applied'] = True
@@ -194,9 +227,55 @@ def from_profile(root, profile):
                             configuration['authority_ref'], configuration['repository'])
 
 
+def repository_profile(root, remote='origin'):
+    """Discover owner opt-in on the actual publication remote, never candidate files.
+
+    The fixed shared state ref also owns the complete policy. Its CAS is the
+    common serialization point for policy changes, holds and effect start.
+    """
+    reader = GitRecoveryStore(root, remote, STATE_REF, 'refs/heads/discovery-placeholder', 'discovery')
+    try:
+        transport = reader.git('remote', 'get-url', '--push', remote)
+    except SyncwheelError:
+        transport = remote
+    lines = reader.git('ls-remote', '--refs', transport, STATE_REF).splitlines()
+    if not lines:
+        return {}
+    if len(lines) != 1 or lines[0].split()[1] != STATE_REF:
+        raise SyncwheelError('ambiguous canonical actor recovery authority')
+    sha = _head(lines[0].split()[0])
+    reader.git('fetch', '--quiet', '--no-write-fetch-head', transport, sha)
+    try:
+        document = json.loads(reader.git('show', sha + ':' + PATH))
+        configuration = copy.deepcopy(document['policy'])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise SyncwheelError('canonical actor recovery policy is missing or invalid') from exc
+    if not isinstance(configuration, dict):
+        raise SyncwheelError('canonical actor recovery policy must be an object')
+    if configuration.get('state_ref') != STATE_REF or configuration.get('repository') != document.get('repository'):
+        raise SyncwheelError('canonical actor recovery policy identity mismatch')
+    # Freeze the transport endpoint; changing a local alias cannot redirect this store.
+    configuration['_declared_remote'] = configuration.get('remote')
+    configuration['remote'] = transport
+    result = {'actor_recovery': configuration}
+    from_profile(root, result)  # Strict policy validation, without initializing anything.
+    return result
+
+
+def _live_policy(root, plan):
+    return repository_profile(root, plan.get('recoveryRemote') or plan.get('targetRemote') or 'origin')
+
+
 def merge_binding(store, profile, plan, reference):
     """Attested responsible agent, never inferred from forge login/lane owner."""
     snapshot = store.snapshot()
+    canonical = copy.deepcopy(snapshot['state'].get('policy'))
+    if not isinstance(canonical, dict):
+        raise SyncwheelError('shared repository publication policy is missing')
+    canonical['_declared_remote'] = canonical.get('remote')
+    canonical['remote'] = store.remote
+    if canonical != profile['actor_recovery']:
+        raise SyncwheelError('complete shared publication policy changed during observation')
     attestation = _record(snapshot['authority'], reference, 'publication', store.repository)
     target = 'refs/heads/' + plan['baseBranch']
     _text(attestation.get('delivery'), 'affected work delivery identity')
@@ -213,6 +292,8 @@ def merge_binding(store, profile, plan, reference):
 
 def reconcile_reference(root, profile, reference, observe):
     """Native recovery even after a crash before the ordinary PR ledger started."""
+    remote = profile.get('_remote') or (profile.get('actor_recovery') or {}).get('remote') or 'origin'
+    profile = repository_profile(root, remote)
     store = from_profile(root, profile)
     if store is None:
         raise SyncwheelError('actor recovery is not enabled')
@@ -222,6 +303,7 @@ def reconcile_reference(root, profile, reference, observe):
     if operation is None or operation['publication'] != binding:
         raise SyncwheelError('publication has no matching durable reservation')
     plan = {'repository': store.repository, 'baseBranch': binding['base_branch'],
+            'targetRemote': store.remote, 'recoveryRemote': store.remote,
             'operationId': binding['operation'], 'headSha': binding['head'],
             'pullRequest': {'number': binding['pull_request'], 'baseSha': binding['base_sha']}}
     observation = observe({'operation': 'observe', 'repository': store.repository,
@@ -231,8 +313,10 @@ def reconcile_reference(root, profile, reference, observe):
 
 
 def reserve_merge(root, profile, plan, *, reference, review=None):
-    if plan.get('actorRecovery') is not None and profile.get('actor_recovery') is None:
-        raise SyncwheelError('actor recovery configuration changed after preview')
+    profile = _live_policy(root, plan)
+    expected = (plan.get('actorRecovery') or {}).get('policy')
+    if expected != profile.get('actor_recovery'):
+        raise SyncwheelError('complete repository publication policy changed after preview')
     if (profile.get('actor_recovery') is None or 'refs/heads/' + plan['baseBranch']
             not in profile['actor_recovery'].get('product_refs', {})):
         return None
@@ -244,7 +328,19 @@ def reserve_merge(root, profile, plan, *, reference, review=None):
     return {'state_sha': sha, 'operation': attestation['operation']}
 
 
+def start_merge(root, plan, reference):
+    profile = _live_policy(root, plan)
+    if (plan.get('actorRecovery') or {}).get('policy') != profile.get('actor_recovery'):
+        raise SyncwheelError('repository publication policy changed before effect start')
+    if not profile:
+        return None
+    store = from_profile(root, profile)
+    snapshot, _ = merge_binding(store, profile, plan, reference)
+    return store.apply(snapshot, 'start', reference)
+
+
 def preview_merge(root, profile, plan, *, reference, review=None):
+    profile = _live_policy(root, plan)
     if (profile.get('actor_recovery') is None or 'refs/heads/' + plan['baseBranch']
             not in profile['actor_recovery'].get('product_refs', {})):
         return None
@@ -253,9 +349,10 @@ def preview_merge(root, profile, plan, *, reference, review=None):
         snapshot, binding = merge_binding(store, profile, plan, reference)
         transition(snapshot['state'], snapshot['authority'], 'prepare', reference, review=review)
         return {'status': 'ready', 'state_sha': snapshot['state_sha'],
-                'authority_sha': snapshot['authority_sha'], 'actor': binding['actor']}
+                'authority_sha': snapshot['authority_sha'], 'actor': binding['actor'],
+                'policy': profile['actor_recovery']}
     except SyncwheelError as exc:
-        return {'status': 'blocked', 'detail': str(exc)}
+        return {'status': 'blocked', 'detail': str(exc), 'policy': profile['actor_recovery']}
 
 
 def reconcile_merge(root, profile, plan, *, reference, observation):
@@ -265,6 +362,7 @@ def reconcile_merge(root, profile, plan, *, reference, observation):
     Failed/unknown execution return codes are not proof of publication failure.
     Unknown observations retain the reservation for later readback.
     """
+    profile = _live_policy(root, plan)
     if (profile.get('actor_recovery') is None or 'refs/heads/' + plan['baseBranch']
             not in profile['actor_recovery'].get('product_refs', {})):
         return None
@@ -302,10 +400,8 @@ def guard_product_push(root, profile, command):
     All in-process Git pushes pass here via the common runner. Out-of-process
     Git/forge clients remain the server's responsibility. Dry runs have no effect.
     """
-    config = profile.get('actor_recovery')
-    if config is None or command[:2] != ['git', 'push'] or '--dry-run' in command or '-n' in command:
+    if command[:2] != ['git', 'push'] or '--dry-run' in command or '-n' in command:
         return
-    store = from_profile(root, profile)
     tokens = command[2:]
     # Syncwheel publication owners emit explicit remote/refspecs. Unknown forms
     # cannot establish that a governed product target is outside their effect.
@@ -330,15 +426,10 @@ def guard_product_push(root, profile, command):
         index += 1
     if selected_remote is None and positional:
         selected_remote = positional.pop(0)
-    if selected_remote is None:
-        raise SyncwheelError('opted-in product publication requires explicit remote/refspec scope')
-    remote = selected_remote
-    configured_url = store.git('remote', 'get-url', '--push', store.remote)
-    try:
-        observed_url = store.git('remote', 'get-url', '--push', remote)
-    except SyncwheelError:
-        observed_url = remote
-    if observed_url != configured_url:
+    remote = selected_remote or 'origin'
+    profile = repository_profile(root, remote)
+    config = profile.get('actor_recovery')
+    if config is None:
         return
     specs = positional
     ambiguous = not specs or any(option in tokens for option in ('--all', '--mirror', '--prune'))
@@ -349,6 +440,8 @@ def guard_product_push(root, profile, command):
             ambiguous = True
         if not target.startswith('refs/'):
             target = 'refs/heads/' + target
+        if target in (STATE_REF, config['authority_ref']):
+            raise SyncwheelError('repository recovery authority requires its dedicated owner path')
         if target in targets:
             raise SyncwheelError('product target requires attributed PR publication via stack merge-pr')
     if ambiguous:
@@ -420,6 +513,10 @@ class GitRecoveryStore:
 
     def snapshot(self):
         state_sha, state = self.read_ref(self.state_ref)
+        if state.get('policy') is not None and (
+                state['policy'].get('state_ref') != self.state_ref
+                or state['policy'].get('authority_ref') != self.authority_ref):
+            raise SyncwheelError('shared repository recovery policy changed; reload owner authority')
         authority_sha, authority = self.read_ref(self.authority_ref)
         return {'state_sha': state_sha, 'authority_sha': authority_sha,
                 'state': state, 'authority': authority}

@@ -7,16 +7,18 @@ permission. Without owner opt-in, existing commands retain their behavior.
 
 ## Ownership and trust
 
-An owner enables the gate in the repository's private profile, separately from
-the candidate. For example:
+An owner provisions the server-protected canonical ref
+`refs/heads/syncwheel/actor-recovery` on the publication repository. Its single
+`.syncwheel/actor-recovery.json` document contains the normal state plus this
+owner-controlled `policy`:
 
 ```json
 {
-  "actor_recovery": {
+  "policy": {
     "enabled": true,
     "repository": "example/project",
     "remote": "origin",
-    "state_ref": "refs/heads/delivery-recovery-state",
+    "state_ref": "refs/heads/syncwheel/actor-recovery",
     "authority_ref": "refs/heads/delivery-recovery-authority",
     "product_refs": ["refs/heads/main"]
   }
@@ -28,17 +30,24 @@ only `.syncwheel/actor-recovery.json`. Protect them server-side: the independent
 maintainer controls authority records, the authorized recovery writer appends
 state, and candidates cannot rewrite either history. The authority document is
 append-only by record ID; correcting an attribution requires an owner-reviewed
-reconciliation, never replacing a record. The local profile is owner configuration,
-not a security boundary against arbitrary local edits or external Git clients.
+reconciliation, never replacing a record. Removing or editing a local profile
+cannot disable repository authority, including in another clone. Forge publication
+discovers policy on the clone URL observed by the existing forge adapter, not the
+candidate-selected Git remote alias. Native pushes discover it on their actual
+destination. Server protections remain the boundary against external Git clients.
 Do not enable this gate where the repository cannot provide those protections.
 
 Authority documents have `schema_version: 1`, `repository`, and `records` keyed
 by immutable reference ID. Initial state is `empty_state(repository)` from
-`syncwheel_actor_recovery`, with empty `incidents`, `operations`, and
-`reviewed_through` maps. Provisioning and authority record creation are deliberate
+`syncwheel_actor_recovery`, with empty `incidents`, `operations`,
+`pending_incidents` and `reviewed_through` maps, plus the owner policy.
+Provisioning and authority record creation are deliberate
 owner operations, outside the candidate's CLI. A missing store refuses operations;
 it is never treated as empty history. Two clones read the same remote refs;
-state appends use exact remote leases and preserve ancestry. Stale writers
+state appends use exact remote leases and preserve ancestry. Complete policy,
+confirmed holds and effect starts contend on that same ref. Policy participates
+in the preview and is checked at reservation and effect start. Changing targets
+or any other field cannot turn a gate into a no-op. Stale writers
 re-read and reapply their intent; there is no automatic merge or retry.
 
 The maintainer verifies identity through the project's authenticated agent/session
@@ -102,7 +111,19 @@ does not change the actor's state. A durable reservation precedes the forge effe
 Only one unresolved publication per actor is allowed; other actors remain free.
 Review debt is consumed only on an exact remote merged observation with merge
 identity and time, never on preview, passing tests, a command exit code, or work-ref
-synchronization. New incidents confirmed after reservation remain outstanding.
+synchronization.
+
+Reservation is not effect authorization. Immediately before calling the forge,
+the publisher must win the durable `effect-start` CAS. If a confirmed hold or a
+policy change wins first, no forge effect starts. This is a shared transaction
+between clones, rather than a second observation with another race window.
+
+If effect-start wins first, new evidence for that delivery is stored durably in
+`pending_incidents`. Confirmation reports `pending_effect`, not a confirmed hold.
+Terminal readback promotes it without dropping evidence or consuming its review
+obligation. Other deliveries proceed; no lease is held during review or CI.
+The effect interval begins at durable effect-start and remains unresolved after
+a crash until readback. Git and forge do not share an atomic transaction.
 
 ## Interrupted publication
 
@@ -134,5 +155,5 @@ Raw Git, another forge client, CI release jobs, external deployment and runtime
 installs are not intercepted. Server protection and their owners must enforce
 the same contract before claiming end-to-end protection there. A local CLI cannot
 authenticate arbitrary agents, secure another clone, or atomically combine forge
-merge and Git state push. Reservation is the authorization boundary; a crash or
+merge and Git state push. Effect-start is the authorization boundary; a crash or
 later observation failure retains uncertain state for native reconciliation.

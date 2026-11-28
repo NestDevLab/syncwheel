@@ -679,6 +679,7 @@ def observe(request, cwd):
             "id": identity.get("id") if isinstance(identity, dict) else None,
         },
         "repositoryInfo": {
+            "cloneUrl": repo_info.get("clone_url"),
             "permissions": repo_info.get("permissions") or {},
             "allowMergeMethods": allow,
             "defaultBranch": repo_info.get("default_branch"),
